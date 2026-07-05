@@ -160,6 +160,30 @@
 
 <script>
 "use strict";
+/* ═══════════════════════════ EDIT ME ═══════════════════════════
+   Everything here is baked into the app, so you never re-enter it —
+   even on a new phone, new browser, or after storage is cleared.
+
+   1) API_KEY — paste your Anthropic key (sk-ant-...) between the quotes
+      before deploying. ⚠️ Anyone you give your site URL to could then
+      use your key, so keep the URL to yourself. Leave "" to enter the
+      key in Settings instead.
+
+   2) PROFILE — your stats. "Get started" uses these and jumps straight
+      to Home. Adjust anytime in Settings → Redo onboarding.          */
+const CONFIG = {
+  API_KEY: "",
+  PROFILE: {
+    sex: "male",          // "male" | "female"
+    age: 25,
+    heightCm: 172,
+    weightKg: 58,
+    activity: "moderate", // sedentary | light | moderate | active | very_active
+    mode: "recomp",       // "recomp" (get lean) | "cut" | "bulk"
+  },
+};
+/* ═══════════════════════════════════════════════════════════════ */
+
 /* ============================== state ============================== */
 const KEY = "caltracker:standalone:v1";
 const MODEL = "claude-opus-4-8";
@@ -175,9 +199,23 @@ const S = {
   today: localDate(new Date()),
   expandedLog: null, confirmDel: null, confirmWipe: false,
 };
-const OB = { step: 0, sex: "male", age: "25", units: "metric",
-  heightCm: "172", heightFt: "5", heightIn: "8", weightKg: "58", weightLb: "128",
-  activity: "moderate", mode: "recomp" };
+const CP = CONFIG.PROFILE || {};
+const OB = { step: 0, manual: false,
+  sex: CP.sex === "female" ? "female" : "male",
+  age: String(CP.age ?? 25), units: "metric",
+  heightCm: String(CP.heightCm ?? 172), heightFt: "5", heightIn: "8",
+  weightKg: String(CP.weightKg ?? 58), weightLb: String(Math.round((CP.weightKg ?? 58) * 2.20462)),
+  activity: ACTIVITY_KEYS_SAFE(CP.activity), mode: ["recomp","cut","bulk"].includes(CP.mode) ? CP.mode : "recomp" };
+function ACTIVITY_KEYS_SAFE(a) {
+  return ["sedentary","light","moderate","active","very_active"].includes(a) ? a : "moderate";
+}
+/* The profile "Get started" creates instantly from CONFIG (null if invalid). */
+function configProfile() {
+  const p = { sex: OB.sex, age: Number(CP.age ?? 25), heightCm: Number(CP.heightCm ?? 172),
+    weightKg: Number(CP.weightKg ?? 58), activity: OB.activity, mode: OB.mode };
+  const ok = p.age >= 10 && p.age <= 100 && p.heightCm >= 90 && p.heightCm <= 250 && p.weightKg >= 25 && p.weightKg <= 350;
+  return ok ? p : null;
+}
 
 function localDate(d) {
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
@@ -190,6 +228,8 @@ function load() {
     S.logs = Array.isArray(raw.logs) ? raw.logs : [];
     S.apiKey = raw.apiKey || "";
   } catch (e) { /* corrupted storage — start fresh */ }
+  // Baked-in key: used whenever no key has been saved in this browser.
+  if (!S.apiKey && CONFIG.API_KEY) S.apiKey = CONFIG.API_KEY;
 }
 function save() {
   const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey };
@@ -550,10 +590,13 @@ function viewOnboarding() {
   const plan = p ? computePlan(p) : null;
   let body = "";
   if (OB.step === 0) {
+    const quick = !OB.manual && configProfile();
     body = `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center">
       <div style="font-size:56px">🍎</div>
       <div style="font-size:30px;font-weight:800;letter-spacing:-0.02em;margin-top:16px">CalTracker</div>
       <p class="ink2" style="font-size:15px;margin-top:12px;max-width:280px">Calorie tracking made easy. Just snap a photo of your food — AI does the rest.</p>
+      ${quick ? `<p class="muted" style="margin-top:16px">Set up for ${quick.heightCm} cm · ${quick.weightKg} kg · ${MODES[quick.mode].label.toLowerCase()} —
+        <a style="color:var(--ink);font-weight:600;text-decoration:underline;cursor:pointer" onclick="event.stopPropagation();OB.manual=true;OB.step=1;render()">edit details</a></p>` : ""}
     </div>`;
   } else if (OB.step === 1) {
     body = `<div style="flex:1">
@@ -654,9 +697,18 @@ function obRefresh() { // live-validate without re-rendering (keeps input focus)
 }
 function obBack() { OB.step--; render(); }
 function obNext() {
+  if (OB.step === 0) {
+    // With baked-in details, "Get started" goes straight to Home.
+    const quick = !OB.manual && configProfile();
+    if (quick) { finishOnboarding(quick); return; }
+    OB.step = 1; render(); return;
+  }
   const p = obProfile();
-  if (OB.step >= 1 && !p) return;
+  if (!p) return;
   if (OB.step < 4) { OB.step++; render(); return; }
+  finishOnboarding(p);
+}
+function finishOnboarding(p) {
   S.profile = p;
   applyPlanAsGoals();
   S.tab = "home";
@@ -900,7 +952,10 @@ function viewSettings() {
       <p class="muted" style="margin-top:4px">Powers the photo analysis. Stored only in this browser — get one at <b>platform.claude.com</b>.</p>
       <input id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(S.apiKey)}" style="margin-top:12px" autocomplete="off"/>
       <button class="btn" style="margin-top:10px;padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
-      <p class="muted" style="margin-top:8px">${S.apiKey ? "✓ Key saved — scanning is enabled." : "⚠️ No key yet — scanning won't work until you add one."}</p>
+      <p class="muted" style="margin-top:8px">${
+        S.apiKey && CONFIG.API_KEY && S.apiKey === CONFIG.API_KEY ? "✓ Using the key built into the app — nothing to re-enter, ever."
+        : S.apiKey ? "✓ Key saved in this browser — scanning is enabled."
+        : "⚠️ No key yet — scanning won't work until you add one. Tip: paste it into the CONFIG block at the top of index.html to make it permanent on every device."}</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">Your details</h2>
@@ -931,12 +986,20 @@ function updateWeight() {
   S.profile.weightKg = w;
   applyPlanAsGoals(); save(); render();
 }
-function redoSetup() { OB.step = 0; S.profile = null; save(); render(); }
+function redoSetup() {
+  OB.manual = true; OB.step = 1;
+  if (S.profile) { // start the form from the current profile
+    OB.sex = S.profile.sex; OB.age = String(S.profile.age); OB.units = "metric";
+    OB.heightCm = String(S.profile.heightCm); OB.weightKg = String(S.profile.weightKg);
+    OB.activity = S.profile.activity; OB.mode = S.profile.mode;
+  }
+  S.profile = null; save(); render();
+}
 function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
-  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: "", confirmWipe: false });
-  OB.step = 0;
+  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "", confirmWipe: false });
+  OB.step = 0; OB.manual = false;
   render();
 }
 
