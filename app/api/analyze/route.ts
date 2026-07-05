@@ -116,9 +116,9 @@ function clamp(n: unknown, min: number, max: number): number {
 }
 
 function sanitize(raw: FoodAnalysis): FoodAnalysis {
-  const items = (Array.isArray(raw.items) ? raw.items : []).map((it) => ({
-    name: String(it.name ?? "Item"),
-    quantity: String(it.quantity ?? ""),
+  const items = (Array.isArray(raw.items) ? raw.items : []).slice(0, 25).map((it) => ({
+    name: String(it.name ?? "Item").slice(0, 80),
+    quantity: String(it.quantity ?? "").slice(0, 40),
     calories: clamp(it.calories, 0, 10000),
     protein_g: clamp(it.protein_g, 0, 1000),
     carbs_g: clamp(it.carbs_g, 0, 1000),
@@ -144,6 +144,12 @@ function sanitize(raw: FoodAnalysis): FoodAnalysis {
 }
 
 export async function POST(req: NextRequest) {
+  // Reject oversized payloads before buffering/parsing the body.
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (contentLength > 11_000_000) {
+    return NextResponse.json({ error: "Request too large." }, { status: 413 });
+  }
+
   if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
     return NextResponse.json(
       { error: "Server is not configured: set ANTHROPIC_API_KEY." },
@@ -158,7 +164,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const { image, description, correction, previous } = body;
+  const { image, description, correction } = body;
+  // `previous` is client-supplied — re-sanitize before it touches the prompt.
+  const previous = body.previous ? sanitize(body.previous) : undefined;
 
   if (!image && !description?.trim()) {
     return NextResponse.json(
@@ -196,7 +204,11 @@ export async function POST(req: NextRequest) {
 
   let instruction: string;
   if (correction?.trim() && previous) {
-    instruction = `Here is your previous analysis of this meal:
+    const original =
+      !image && description?.trim()
+        ? `The meal was originally described as: "${description.trim().slice(0, 1000)}"\n\n`
+        : "";
+    instruction = `${original}Here is your previous analysis of this meal:
 ${JSON.stringify(previous)}
 
 The user says the analysis needs fixing: "${correction.trim().slice(0, 500)}"
@@ -214,7 +226,9 @@ right; only change what the correction implies.`;
   }
   content.push({ type: "text", text: instruction });
 
-  const client = new Anthropic();
+  // Budget: 55s per attempt × (1 + 1 retry) stays under the 120s route limit,
+  // so timeouts still return this route's JSON error contract.
+  const client = new Anthropic({ timeout: 55_000, maxRetries: 1 });
 
   try {
     const response = await client.messages.create({

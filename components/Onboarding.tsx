@@ -333,6 +333,11 @@ export default function Onboarding() {
       )}
 
       {/* Footer buttons */}
+      {step === 1 && !profile && (
+        <p className="mt-4 text-center text-xs font-medium text-danger">
+          Please enter a valid age (10–100), height and weight.
+        </p>
+      )}
       <div className="mt-8 flex gap-2">
         {step > 0 && (
           <button

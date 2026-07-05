@@ -1,20 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
-import { todayKey } from "@/lib/dates";
 import DateStrip from "@/components/DateStrip";
 import CalorieCard from "@/components/CalorieCard";
 import MacroCard from "@/components/MacroCard";
 import FoodList from "@/components/FoodList";
 
 export default function HomePage() {
-  const { goals, streak, logsFor, totalsFor, deleteLog } = useStore();
-  const [selectedDay, setSelectedDay] = useState(todayKey);
+  const { goals, streak, today, logsFor, totalsFor, deleteLog } = useStore();
+  const [selectedDay, setSelectedDay] = useState(today);
+
+  // When the date rolls over while the tab is open, follow it — but only if
+  // the user was viewing "today" (don't yank them off a day they picked).
+  const prevToday = useRef(today);
+  useEffect(() => {
+    if (prevToday.current !== today) {
+      setSelectedDay((d) => (d === prevToday.current ? today : d));
+      prevToday.current = today;
+    }
+  }, [today]);
 
   const totals = totalsFor(selectedDay);
   const logs = logsFor(selectedDay);
-  const isToday = selectedDay === todayKey();
+  const isToday = selectedDay === today;
 
   return (
     <div className="space-y-5">

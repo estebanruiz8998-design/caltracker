@@ -27,6 +27,8 @@ interface StoreValue extends PersistedState {
   hydrated: boolean;
   onboarded: boolean;
   streak: number;
+  /** Current local date key, kept fresh across midnight while the tab is open */
+  today: string;
   completeOnboarding: (profile: Profile, goals: Goals) => void;
   setGoals: (goals: Goals) => void;
   /** Clears the profile (re-runs onboarding) but keeps logs and goals. */
@@ -74,11 +76,11 @@ function persist(state: PersistedState) {
   }
 }
 
-function computeStreak(logs: FoodLog[]): number {
+function computeStreak(logs: FoodLog[], today: string): number {
   const daysWithLogs = new Set(logs.map((l) => l.date));
   if (daysWithLogs.size === 0) return 0;
   let streak = 0;
-  let cursor = new Date();
+  let cursor = new Date(`${today}T12:00:00`);
   // A streak survives today being empty (the day isn't over yet).
   if (!daysWithLogs.has(dateKey(cursor))) {
     cursor = addDays(cursor, -1);
@@ -97,11 +99,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     logs: [],
   });
   const [hydrated, setHydrated] = useState(false);
+  const [today, setToday] = useState(todayKey);
   const skipPersist = useRef(true);
 
   useEffect(() => {
     setState(load());
     setHydrated(true);
+  }, []);
+
+  // Keep "today" current so streaks/day views roll over at midnight even if
+  // the tab stays open.
+  useEffect(() => {
+    const refresh = () => setToday(todayKey());
+    const interval = setInterval(refresh, 30_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
+  // Multi-tab sync: when another tab writes, re-load instead of clobbering it
+  // with this tab's stale state on the next persist.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY) return;
+      skipPersist.current = true;
+      setState(load());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   useEffect(() => {
@@ -159,7 +186,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ...state,
       hydrated,
       onboarded: state.profile !== null,
-      streak: computeStreak(state.logs),
+      today,
+      streak: computeStreak(state.logs, today),
       completeOnboarding,
       setGoals,
       resetProfile,
@@ -172,6 +200,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [
     state,
     hydrated,
+    today,
     completeOnboarding,
     setGoals,
     resetProfile,

@@ -18,6 +18,7 @@ export default function FoodList({
   onDelete: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
   if (logs.length === 0) {
     return (
@@ -42,7 +43,10 @@ export default function FoodList({
           <li key={log.id} className="card overflow-hidden">
             <button
               type="button"
-              onClick={() => setExpanded(isOpen ? null : log.id)}
+              onClick={() => {
+                setExpanded(isOpen ? null : log.id);
+                setConfirmingDelete(null);
+              }}
               className="flex w-full items-center gap-3 p-3 text-left"
               aria-expanded={isOpen}
             >
@@ -114,10 +118,21 @@ export default function FoodList({
                   </span>
                   <button
                     type="button"
-                    onClick={() => onDelete(log.id)}
-                    className="text-xs font-semibold text-danger"
+                    onClick={() => {
+                      if (confirmingDelete === log.id) {
+                        onDelete(log.id);
+                        setConfirmingDelete(null);
+                      } else {
+                        setConfirmingDelete(log.id);
+                      }
+                    }}
+                    className={`-m-2 rounded-full p-2 text-xs font-semibold ${
+                      confirmingDelete === log.id
+                        ? "bg-danger px-3 text-white"
+                        : "text-danger"
+                    }`}
                   >
-                    Delete
+                    {confirmingDelete === log.id ? "Tap to confirm" : "Delete"}
                   </button>
                 </div>
               </div>

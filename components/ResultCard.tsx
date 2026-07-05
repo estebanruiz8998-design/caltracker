@@ -28,7 +28,7 @@ export default function ResultCard({
   photo: string | null;
   fixing: boolean;
   fixError: string;
-  onFix: (correction: string) => void;
+  onFix: (correction: string) => Promise<boolean>;
   onLog: () => void;
   onRetake: () => void;
 }) {
@@ -37,7 +37,7 @@ export default function ResultCard({
 
   if (!analysis.is_food) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 pt-4 text-center">
+      <div className="flex min-h-full flex-col items-center justify-center gap-4 pt-4 text-center">
         <span className="text-4xl" aria-hidden>
           🤔
         </span>
@@ -56,11 +56,11 @@ export default function ResultCard({
     );
   }
 
-  function submitFix() {
+  async function submitFix() {
     const text = correction.trim();
     if (!text || fixing) return;
-    onFix(text);
-    setCorrection("");
+    // Keep the text if the request fails so the user can retry or edit it.
+    if (await onFix(text)) setCorrection("");
   }
 
   return (
@@ -187,7 +187,7 @@ export default function ResultCard({
               onChange={(e) => setCorrection(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && submitFix()}
               placeholder="e.g. It was a double portion / no dressing"
-              className="mt-2 w-full rounded-2xl border border-black/10 bg-page p-3 text-sm outline-none focus:border-black/30"
+              className="mt-2 w-full rounded-2xl border border-black/10 bg-page p-3 text-base outline-none focus:border-black/30"
               disabled={fixing}
             />
             {fixError && (

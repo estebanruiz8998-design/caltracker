@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FoodAnalysis, FoodLog } from "@/lib/types";
 import { resizeImage } from "@/lib/image";
 import { useStore } from "@/lib/store";
@@ -43,14 +43,30 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
 
+  // Guards against stale responses: any new scan/retake bumps the generation,
+  // and in-flight requests from older generations are discarded on arrival.
+  const generation = useRef(0);
+
+  // Lock the page behind the sheet while it's open.
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
+
   async function analyze(payload: Parameters<typeof callAnalyze>[0]) {
+    const gen = ++generation.current;
     setStage("analyzing");
     setError("");
     try {
       const result = await callAnalyze(payload);
+      if (gen !== generation.current) return;
       setAnalysis(result);
       setStage("result");
     } catch (e) {
+      if (gen !== generation.current) return;
       setError(e instanceof Error ? e.message : "Something went wrong.");
       setStage("error");
     }
@@ -81,8 +97,9 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
     await analyze({ description: description.trim() });
   }
 
-  async function handleFix(correction: string) {
-    if (!analysis) return;
+  async function handleFix(correction: string): Promise<boolean> {
+    if (!analysis) return false;
+    const gen = generation.current;
     setFixing(true);
     setError("");
     try {
@@ -93,11 +110,15 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
         correction,
         previous: analysis,
       });
+      if (gen !== generation.current) return false;
       setAnalysis(result);
+      return true;
     } catch (e) {
+      if (gen !== generation.current) return false;
       setError(e instanceof Error ? e.message : "Fix failed. Please try again.");
+      return false;
     } finally {
-      setFixing(false);
+      if (gen === generation.current) setFixing(false);
     }
   }
 
@@ -152,9 +173,9 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8">
           {stage === "input" && (
-            <div className="flex h-full flex-col justify-center gap-3 pt-4">
+            <div className="flex min-h-full flex-col justify-center gap-3 pt-4">
               <input
                 ref={cameraRef}
                 type="file"
@@ -235,7 +256,7 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
                     onChange={(e) => setDescription(e.target.value)}
                     placeholder="e.g. Grilled chicken burrito with rice, black beans and guacamole"
                     rows={4}
-                    className="mt-3 w-full resize-none rounded-2xl border border-black/10 bg-page p-3 text-sm outline-none focus:border-black/30"
+                    className="mt-3 w-full resize-none rounded-2xl border border-black/10 bg-page p-3 text-base outline-none focus:border-black/30"
                   />
                   <div className="mt-3 flex gap-2">
                     <button
@@ -260,7 +281,7 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
           )}
 
           {stage === "analyzing" && (
-            <div className="flex h-full flex-col items-center justify-center gap-5 pt-4">
+            <div className="flex min-h-full flex-col items-center justify-center gap-5 pt-4">
               {thumb ? (
                 <div className="relative">
                   <img
@@ -291,6 +312,8 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
               onFix={handleFix}
               onLog={handleLog}
               onRetake={() => {
+                generation.current++;
+                setFixing(false);
                 setAnalysis(null);
                 setImageBase64(null);
                 setThumb(null);
@@ -301,7 +324,7 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
           )}
 
           {stage === "error" && (
-            <div className="flex h-full flex-col items-center justify-center gap-4 pt-4 text-center">
+            <div className="flex min-h-full flex-col items-center justify-center gap-4 pt-4 text-center">
               <span className="text-4xl" aria-hidden>
                 😕
               </span>

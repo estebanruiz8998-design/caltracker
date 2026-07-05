@@ -20,6 +20,7 @@ export default function SettingsPage() {
     fat_g: String(goals.fat_g),
   });
   const [saved, setSaved] = useState(false);
+  const [goalError, setGoalError] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
@@ -32,13 +33,17 @@ export default function SettingsPage() {
   }, [goals]);
 
   function save() {
-    const next: Goals = {
-      calories: Math.max(0, Math.round(Number(draft.calories) || 0)),
-      protein_g: Math.max(0, Math.round(Number(draft.protein_g) || 0)),
-      carbs_g: Math.max(0, Math.round(Number(draft.carbs_g) || 0)),
-      fat_g: Math.max(0, Math.round(Number(draft.fat_g) || 0)),
-    };
-    setGoals(next);
+    const parsed = {} as Goals;
+    for (const { key, label } of GOAL_FIELDS) {
+      const n = Number(draft[key]);
+      if (draft[key].trim() === "" || !Number.isFinite(n) || n <= 0) {
+        setGoalError(`${label} must be a number greater than 0.`);
+        return;
+      }
+      parsed[key] = Math.round(n);
+    }
+    setGoalError("");
+    setGoals(parsed);
     setSaved(true);
     setTimeout(() => setSaved(false), 1600);
   }
@@ -66,7 +71,7 @@ export default function SettingsPage() {
                   onChange={(e) =>
                     setDraft((d) => ({ ...d, [key]: e.target.value }))
                   }
-                  className="w-full rounded-xl border border-black/10 bg-page py-2.5 pl-3 pr-11 text-right text-sm font-semibold outline-none focus:border-black/30"
+                  className="w-full rounded-xl border border-black/10 bg-page py-2.5 pl-3 pr-11 text-right text-base font-semibold outline-none focus:border-black/30"
                 />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted">
                   {unit}
@@ -75,6 +80,9 @@ export default function SettingsPage() {
             </div>
           ))}
         </div>
+        {goalError && (
+          <p className="mt-3 text-xs font-medium text-danger">{goalError}</p>
+        )}
         <button
           type="button"
           onClick={save}

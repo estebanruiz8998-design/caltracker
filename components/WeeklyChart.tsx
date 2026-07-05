@@ -149,9 +149,13 @@ export default function WeeklyChart({
                 width={band}
                 height={plotH}
                 fill="transparent"
-                onPointerEnter={() => setActive(i)}
-                onPointerLeave={() => setActive(null)}
-                onClick={() => setActive(isActive ? null : i)}
+                onPointerEnter={(e) => {
+                  if (e.pointerType === "mouse") setActive(i);
+                }}
+                onPointerLeave={(e) => {
+                  if (e.pointerType === "mouse") setActive(null);
+                }}
+                onClick={() => setActive((a) => (a === i ? null : i))}
               />
               {/* x labels */}
               <text
