@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#f9f9f7" />
+<title>CalTracker — AI Calorie Scanner</title>
+<style>
+  :root {
+    --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --page: #f9f9f7; --card: #ffffff; --grid: #e1e0d9;
+    --protein: #e34948; --carbs: #eda100; --fat: #2a78d6;
+    --good: #0ca30c; --warn: #fab219; --danger: #d03b3b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--page); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased; overscroll-behavior-y: none;
+  }
+  #app { max-width: 448px; margin: 0 auto; min-height: 100dvh; }
+  main { padding: 16px 20px 128px; }
+  h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
+  h2 { font-size: 15px; font-weight: 700; }
+  .card {
+    background: var(--card); border: 1px solid rgba(11,11,11,0.08);
+    border-radius: 24px; box-shadow: 0 1px 2px rgba(11,11,11,0.04);
+  }
+  .btn {
+    display: block; width: 100%; border: 0; border-radius: 999px;
+    background: var(--ink); color: #fff; font: inherit; font-size: 14px;
+    font-weight: 600; padding: 14px; cursor: pointer;
+  }
+  .btn:disabled { opacity: 0.4; }
+  .btn.ghost { background: var(--card); color: var(--ink); border: 1px solid rgba(11,11,11,0.1); }
+  .btn.small { width: auto; padding: 10px 20px; display: inline-block; }
+  input, textarea, select {
+    width: 100%; font: inherit; font-size: 16px; font-weight: 600;
+    border: 1px solid rgba(11,11,11,0.1); border-radius: 16px;
+    background: var(--card); padding: 12px 14px; outline: none; color: var(--ink);
+  }
+  input:focus, textarea:focus { border-color: rgba(11,11,11,0.4); }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .ink2 { color: var(--ink2); }
+  .seg { display: flex; gap: 8px; }
+  .seg button {
+    flex: 1; font: inherit; font-size: 14px; font-weight: 600; padding: 12px;
+    border-radius: 16px; border: 1px solid rgba(11,11,11,0.1); background: var(--card); cursor: pointer;
+  }
+  .seg button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  nav {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+    max-width: 448px; margin: 0 auto;
+    background: rgba(255,255,255,0.95); backdrop-filter: blur(8px);
+    border-top: 1px solid rgba(11,11,11,0.07);
+    padding: 8px 24px calc(env(safe-area-inset-bottom, 0px) + 12px);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  nav a {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    width: 52px; font-size: 10px; font-weight: 500; color: var(--muted);
+    text-decoration: none; padding: 4px 0; cursor: pointer;
+  }
+  nav a.on { color: var(--ink); }
+  .fab {
+    width: 56px; height: 56px; margin-top: -28px; border: 0; border-radius: 999px;
+    background: var(--ink); color: #fff; font-size: 28px; line-height: 1;
+    cursor: pointer; box-shadow: 0 6px 16px rgba(11,11,11,0.25);
+  }
+  .fab:active { transform: scale(0.95); }
+  .sheet {
+    position: fixed; inset: 0; z-index: 50; max-width: 448px; margin: 0 auto;
+    background: var(--page); display: flex; flex-direction: column;
+    animation: up 0.22s ease-out;
+  }
+  @keyframes up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 20px 8px; }
+  .sheet-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 20px 32px; }
+  .center-col { display: flex; flex-direction: column; justify-content: center; min-height: 100%; gap: 12px; padding-top: 16px; }
+  .xbtn {
+    width: 36px; height: 36px; border-radius: 999px; border: 1px solid rgba(11,11,11,0.1);
+    background: var(--card); font-size: 15px; cursor: pointer; color: var(--ink);
+  }
+  .shimmer {
+    background: linear-gradient(90deg, rgba(11,11,11,0.05) 25%, rgba(11,11,11,0.12) 50%, rgba(11,11,11,0.05) 75%);
+    background-size: 800px 100%; animation: sh 1.4s infinite linear;
+  }
+  @keyframes sh { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; }
+  .meter { height: 8px; border-radius: 999px; overflow: hidden; }
+  .meter > div { height: 100%; border-radius: 999px; }
+  .banner {
+    display: flex; align-items: center; gap: 8px; border-radius: 16px;
+    background: #e9f6e9; color: #0a5c0a; font-size: 13px; font-weight: 600; padding: 12px 14px;
+  }
+  .err { color: var(--danger); font-size: 12px; font-weight: 500; margin-top: 8px; }
+  .list-item { display: flex; gap: 12px; align-items: center; padding: 12px; cursor: pointer; }
+  .thumb { width: 56px; height: 56px; border-radius: 16px; object-fit: cover; background: var(--page);
+           display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+  .plan-num { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+  .refs { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  .pill { display: inline-block; border-radius: 999px; background: var(--page); font-size: 11px;
+          font-weight: 600; color: var(--ink2); padding: 4px 10px; }
+  .stat-strip { display: flex; justify-content: space-between; }
+  .day { display: flex; flex-direction: column; align-items: center; gap: 6px; background: none; border: 0; font: inherit; cursor: pointer; }
+  .day .num { width: 36px; height: 36px; border-radius: 999px; display: flex; align-items: center;
+              justify-content: center; font-size: 14px; font-weight: 600; color: var(--ink2); }
+  .day.sel .num { background: var(--ink); color: #fff; }
+  .day.today:not(.sel) .num { border: 1px solid rgba(11,11,11,0.15); }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<input type="file" accept="image/*" capture="environment" id="cameraInput" hidden />
+<input type="file" accept="image/*" id="galleryInput" hidden />
+
+<script>
+"use strict";
+/* ============================== state ============================== */
+const KEY = "caltracker:standalone:v1";
+const MODEL = "claude-opus-4-8";
+
+const S = {
+  profile: null,          // {sex, age, heightCm, weightKg, activity, mode}
+  goals: null,            // {calories, protein_g, carbs_g, fat_g, fiber_g, water_ml}
+  logs: [],               // FoodLog[]
+  apiKey: "",
+  tab: "home",            // home | plan | settings
+  selectedDay: null,
+  scan: null,             // null | {stage, thumb, imageB64, description, analysis, logId, error, fixing}
+  today: localDate(new Date()),
+};
+
+function localDate(d) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function load() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
+    S.profile = raw.profile || null;
+    S.goals = raw.goals || null;
+    S.logs = Array.isArray(raw.logs) ? raw.logs : [];
+    S.apiKey = raw.apiKey || "";
+  } catch (e) { /* corrupted storage — start fresh */ }
+}
+function save() {
+  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey };
+  try { localStorage.setItem(KEY, JSON.stringify(data)); }
+  catch (e) {
+    try { // quota: drop photos, retry
+      data.logs = data.logs.map(({ photo, ...rest }) => rest);
+      localStorage.setItem(KEY, JSON.stringify(data));
+    } catch (e2) { /* keep in memory only */ }
+  }
+}
+// multi-tab sync
+window.addEventListener("storage", (e) => { if (e.key === KEY) { load(); render(); } });
+// midnight rollover
+setInterval(() => {
+  const t = localDate(new Date());
+  if (t !== S.today) {
+    if (S.selectedDay === S.today) S.selectedDay = t;
+    S.today = t; render();
+  }
+}, 30000);
+document.addEventListener("visibilitychange", () => {
+  const t = localDate(new Date());
+  if (t !== S.today) { if (S.selectedDay === S.today) S.selectedDay = t; S.today = t; render(); }
+});
+
+/* ========================= plan math (research-based) =========================
+   BMR: Mifflin-St Jeor (1990) — the equation with the best validation in
+   non-obese adults (ADA evidence analysis).
+   Protein: 1.6–2.2 g/kg/day; benefits of more plateau ≈1.6 g/kg in a
+   surplus (Morton et al. 2018, Br J Sports Med meta-analysis of 49 RCTs);
+   the higher end protects lean mass in a deficit (Helms et al. 2014;
+   ISSN Position Stand, Jäger et al. 2017). We use 2.0 g/kg.
+   Fat: ≥0.5–1 g/kg to support hormones (Helms 2014); we use 0.9 g/kg.
+   Recomp: modest ~10% deficit — slower rates preserve lean mass vs
+   aggressive cuts (Garthe et al. 2011). Carbs fill remaining calories to
+   fuel training (3–7 g/kg, ISSN). Fiber: 14 g/1000 kcal (IOM DRI).
+   Water: ≈35 ml/kg baseline (EFSA 2010). */
+const ACTIVITY = {
+  sedentary:  { x: 1.2,   label: "Sedentary",  hint: "Little exercise" },
+  light:      { x: 1.375, label: "Light",      hint: "1–3 workouts/week" },
+  moderate:   { x: 1.55,  label: "Moderate",   hint: "3–5 workouts/week" },
+  active:     { x: 1.725, label: "Active",     hint: "6–7 workouts/week" },
+};
+const MODES = {
+  recomp: { label: "Lean recomp", adj: (t) => Math.round(t * 0.90), hint: "Build muscle while slowly dropping fat — recommended at your stats" },
+  cut:    { label: "Cut",         adj: (t) => Math.round(t * 0.80), hint: "Faster fat loss (~0.5%/week) — use for a final push" },
+  bulk:   { label: "Lean bulk",   adj: (t) => Math.round(t + 200),  hint: "Prioritize muscle gain with minimal fat" },
+};
+function computePlan(p) {
+  const bmr = 10 * p.weightKg + 6.25 * p.heightCm - 5 * p.age + (p.sex === "male" ? 5 : -161);
+  const tdee = Math.round(bmr * ACTIVITY[p.activity].x);
+  const calories = Math.max(1300, MODES[p.mode].adj(tdee));
+  const protein_g = Math.round(p.weightKg * 2.0);
+  const fat_g = Math.round(p.weightKg * 0.9);
+  const carbs_g = Math.max(0, Math.round((calories - protein_g * 4 - fat_g * 9) / 4));
+  return {
+    bmr: Math.round(bmr), tdee, calories, protein_g, fat_g, carbs_g,
+    fiber_g: Math.round(calories / 1000 * 14),
+    water_ml: Math.round(p.weightKg * 35),
+    proteinPerMeal: Math.round(p.weightKg * 0.4),
+  };
+}
+function applyPlanAsGoals() {
+  const plan = computePlan(S.profile);
+  S.goals = { calories: plan.calories, protein_g: plan.protein_g, carbs_g: plan.carbs_g, fat_g: plan.fat_g };
+  save();
+}
+
+/* ============================== helpers ============================== */
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+function fmt(n) { return Math.round(n).toLocaleString(); }
+function logsFor(day) { return S.logs.filter((l) => l.date === day); }
+function totalsFor(day) {
+  return logsFor(day).reduce((a, l) => ({
+    calories: a.calories + l.calories, protein_g: a.protein_g + l.protein_g,
+    carbs_g: a.carbs_g + l.carbs_g, fat_g: a.fat_g + l.fat_g,
+  }), { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0 });
+}
+function streak() {
+  const days = new Set(S.logs.map((l) => l.date));
+  if (!days.size) return 0;
+  let n = 0, cur = new Date(S.today + "T12:00:00");
+  if (!days.has(localDate(cur))) cur.setDate(cur.getDate() - 1);
+  while (days.has(localDate(cur))) { n++; cur.setDate(cur.getDate() - 1); }
+  return n;
+}
+function ring(size, stroke, progress, color, track, inner) {
+  const p = Math.min(1, Math.max(0, progress || 0));
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r, mid = size / 2;
+  return `<div style="position:relative;width:${size}px;height:${size}px;display:inline-flex;align-items:center;justify-content:center">
+    <svg width="${size}" height="${size}" style="transform:rotate(-90deg)" aria-hidden="true">
+      <circle cx="${mid}" cy="${mid}" r="${r}" fill="none" stroke="${track}" stroke-width="${stroke}"/>
+      ${p > 0 ? `<circle cx="${mid}" cy="${mid}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+        stroke-linecap="round" stroke-dasharray="${c * p} ${c}"/>` : ""}
+    </svg>
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">${inner || ""}</div>
+  </div>`;
+}
+function tint(hex, pct) { return `color-mix(in srgb, ${hex} ${pct}%, white)`; }
+
+/* ============================== Claude API ============================== */
+const SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["is_food","food_name","emoji","items","calories","protein_g","carbs_g","fat_g","health_score","confidence","notes"],
+  properties: {
+    is_food: { type: "boolean", description: "false if the image contains no food or drink" },
+    food_name: { type: "string", description: "Short display name for the meal" },
+    emoji: { type: "string", description: "Single emoji representing the meal" },
+    items: { type: "array", description: "Each distinct food item with estimated portion",
+      items: { type: "object", additionalProperties: false,
+        required: ["name","quantity","calories","protein_g","carbs_g","fat_g"],
+        properties: { name:{type:"string"}, quantity:{type:"string"},
+          calories:{type:"number"}, protein_g:{type:"number"}, carbs_g:{type:"number"}, fat_g:{type:"number"} } } },
+    calories: { type: "number" }, protein_g: { type: "number" },
+    carbs_g: { type: "number" }, fat_g: { type: "number" },
+    health_score: { type: "integer", enum: [1,2,3,4,5,6,7,8,9,10] },
+    confidence: { type: "string", enum: ["low","medium","high"] },
+    notes: { type: "string", description: "One short sentence about assumptions" },
+  },
+};
+const SYSTEM_PROMPT = `You are the nutrition analysis engine of a photo calorie-tracking app.
+Given a photo (and/or description) of food, identify the meal and estimate its nutrition accurately.
+- Estimate portions from visual cues (plate size, utensils, packaging).
+- Account for likely cooking oils, dressings and sauces even when not obvious.
+- Break the meal into distinct components in "items"; totals must equal the item sum.
+- Use realistic USDA-style values. When unsure, give your best single estimate and lower confidence.
+- health_score: 10 = whole nutrient-dense food; 1 = heavily processed with little nutritional value.
+- If the image contains no food or drink, set is_food=false with zeros and explain in notes.`;
+
+function clampN(n, max) { const x = typeof n === "number" && isFinite(n) ? n : 0; return Math.min(max, Math.max(0, Math.round(x * 10) / 10)); }
+function sanitize(raw) {
+  const items = (Array.isArray(raw.items) ? raw.items : []).slice(0, 25).map((it) => ({
+    name: String(it.name ?? "Item").slice(0, 80), quantity: String(it.quantity ?? "").slice(0, 40),
+    calories: clampN(it.calories, 10000), protein_g: clampN(it.protein_g, 1000),
+    carbs_g: clampN(it.carbs_g, 1000), fat_g: clampN(it.fat_g, 1000),
+  }));
+  return {
+    is_food: !!raw.is_food,
+    food_name: String(raw.food_name ?? "Unknown food").slice(0, 80),
+    emoji: String(raw.emoji ?? "🍽️").slice(0, 8),
+    items,
+    calories: clampN(raw.calories, 20000), protein_g: clampN(raw.protein_g, 2000),
+    carbs_g: clampN(raw.carbs_g, 2000), fat_g: clampN(raw.fat_g, 2000),
+    health_score: [1,2,3,4,5,6,7,8,9,10].includes(raw.health_score) ? raw.health_score : 5,
+    confidence: ["low","medium","high"].includes(raw.confidence) ? raw.confidence : "medium",
+    notes: String(raw.notes ?? "").slice(0, 400),
+  };
+}
+
+async function analyzeWithClaude({ imageB64, description, correction, previous }) {
+  if (!S.apiKey) throw new Error("Add your Anthropic API key in Settings first.");
+  const content = [];
+  if (imageB64) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageB64 } });
+  let instruction;
+  if (correction && previous) {
+    const original = !imageB64 && description ? `The meal was originally described as: "${description.slice(0,1000)}"\n\n` : "";
+    instruction = `${original}Here is your previous analysis of this meal:\n${JSON.stringify(sanitize(previous))}\n\nThe user says the analysis needs fixing: "${correction.slice(0,500)}"\n\nRe-analyze applying the correction. Keep what was right; only change what the correction implies.`;
+  } else if (description && !imageB64) {
+    instruction = `Analyze this meal from the user's description (no photo):\n"${description.slice(0,1000)}"`;
+  } else {
+    instruction = "Analyze the food in this photo.";
+  }
+  content.push({ type: "text", text: instruction });
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": S.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 16000,
+      thinking: { type: "adaptive" },
+      system: SYSTEM_PROMPT,
+      output_config: { format: { type: "json_schema", schema: SCHEMA } },
+      messages: [{ role: "user", content }],
+    }),
+  });
+
+  if (!res.ok) {
+    let msg = "Analysis failed. Please try again.";
+    try {
+      const err = await res.json();
+      if (res.status === 401) msg = "Invalid API key — check it in Settings.";
+      else if (res.status === 429) msg = "Rate limited — wait a moment and try again.";
+      else if (err?.error?.message) msg = err.error.message.slice(0, 160);
+    } catch (e) { /* keep generic message */ }
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  if (data.stop_reason === "refusal") throw new Error("The analysis was declined. Try a different photo.");
+  if (data.stop_reason === "max_tokens") throw new Error("Analysis ran too long. Please try again.");
+  const text = (data.content || []).find((b) => b.type === "text");
+  if (!text) throw new Error("No analysis returned. Please try again.");
+  return sanitize(JSON.parse(text.text));
+}
+
+/* ============================== image utils ============================== */
+async function resizeToJpeg(file, maxEdge, quality) {
+  const bmp = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    const dataUrl = c.toDataURL("image/jpeg", quality);
+    return { dataUrl, b64: dataUrl.split(",")[1] };
+  } finally { bmp.close(); }
+}
+
+/* ============================== scan flow ============================== */
+let scanGen = 0;
+
+function openScan() {
+  S.scan = { stage: "input", thumb: null, imageB64: null, description: "", analysis: null, logId: null, error: "", fixing: false, describeMode: false };
+  render();
+}
+function closeScan() { scanGen++; S.scan = null; render(); }
+
+async function onFilePicked(file) {
+  if (!file || !S.scan) return;
+  if (!S.apiKey) { S.scan.error = "Add your Anthropic API key in Settings first."; S.scan.stage = "error"; render(); return; }
+  const gen = ++scanGen;
+  S.scan.stage = "analyzing"; S.scan.error = ""; render();
+  try {
+    const [full, small] = await Promise.all([resizeToJpeg(file, 1024, 0.82), resizeToJpeg(file, 240, 0.7)]);
+    if (gen !== scanGen || !S.scan) return;
+    S.scan.imageB64 = full.b64; S.scan.thumb = small.dataUrl; render();
+    const analysis = await analyzeWithClaude({ imageB64: full.b64 });
+    if (gen !== scanGen || !S.scan) return;
+    finishAnalysis(analysis);
+  } catch (e) {
+    if (gen !== scanGen || !S.scan) return;
+    S.scan.error = e.message || "Something went wrong."; S.scan.stage = "error"; render();
+  }
+}
+async function onDescribe() {
+  const text = S.scan?.description?.trim();
+  if (!text) return;
+  if (!S.apiKey) { S.scan.error = "Add your Anthropic API key in Settings first."; S.scan.stage = "error"; render(); return; }
+  const gen = ++scanGen;
+  S.scan.stage = "analyzing"; S.scan.thumb = null; S.scan.imageB64 = null; render();
+  try {
+    const analysis = await analyzeWithClaude({ description: text });
+    if (gen !== scanGen || !S.scan) return;
+    finishAnalysis(analysis);
+  } catch (e) {
+    if (gen !== scanGen || !S.scan) return;
+    S.scan.error = e.message || "Something went wrong."; S.scan.stage = "error"; render();
+  }
+}
+/* Auto-log: the analyzed meal is written to today's diary immediately. */
+function finishAnalysis(analysis) {
+  S.scan.analysis = analysis;
+  S.scan.stage = "result";
+  if (analysis.is_food) {
+    const now = new Date();
+    const log = {
+      id: now.getTime() + "-" + Math.random().toString(36).slice(2, 8),
+      date: localDate(now), loggedAt: now.getTime(),
+      name: analysis.food_name, emoji: analysis.emoji,
+      calories: analysis.calories, protein_g: analysis.protein_g,
+      carbs_g: analysis.carbs_g, fat_g: analysis.fat_g,
+      health_score: analysis.health_score, items: analysis.items,
+      photo: S.scan.thumb || undefined,
+    };
+    S.logs.unshift(log);
+    S.scan.logId = log.id;
+    save();
+  }
+  render();
+}
+async function onFix() {
+  const input = document.getElementById("fixInput");
+  const text = input?.value.trim();
+  if (!text || !S.scan?.analysis || S.scan.fixing) return;
+  const gen = scanGen;
+  S.scan.fixing = true; S.scan.error = ""; render();
+  try {
+    const updated = await analyzeWithClaude({
+      imageB64: S.scan.imageB64 || undefined,
+      description: S.scan.imageB64 ? undefined : (S.scan.description.trim() || S.scan.analysis.food_name),
+      correction: text, previous: S.scan.analysis,
+    });
+    if (gen !== scanGen || !S.scan) return;
+    S.scan.analysis = updated;
+    S.scan.keepFixText = "";
+    // update the auto-logged entry in place
+    const log = S.logs.find((l) => l.id === S.scan.logId);
+    if (log) Object.assign(log, {
+      name: updated.food_name, emoji: updated.emoji, calories: updated.calories,
+      protein_g: updated.protein_g, carbs_g: updated.carbs_g, fat_g: updated.fat_g,
+      health_score: updated.health_score, items: updated.items,
+    });
+    save();
+  } catch (e) {
+    if (gen !== scanGen || !S.scan) return;
+    S.scan.error = e.message || "Fix failed. Please try again.";
+    S.scan.keepFixText = text;
+  } finally {
+    if (gen === scanGen && S.scan) { S.scan.fixing = false; render(); }
+  }
+}
+function onRemoveScanned() {
+  if (S.scan?.logId) { S.logs = S.logs.filter((l) => l.id !== S.scan.logId); save(); }
+  closeScan();
+}
+
+/* ============================== views ============================== */
+const NAV_ICONS = {
+  home: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M3.5 10.5 12 3.5l8.5 7v9a1 1 0 0 1-1 1h-5v-6h-5v6h-5a1 1 0 0 1-1-1v-9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
+  plan: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v5l3.5 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  settings: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.8 13.6 5a7.6 7.6 0 0 1 2.7 1.1l2.7-.6 1.6 2.8-1.9 2a7.7 7.7 0 0 1 0 3.2l1.9 2-1.6 2.8-2.7-.6a7.6 7.6 0 0 1-2.7 1.1L12 21.2 10.4 19a7.6 7.6 0 0 1-2.7-1.1l-2.7.6-1.6-2.8 1.9-2a7.7 7.7 0 0 1 0-3.2l-1.9-2 1.6-2.8 2.7.6A7.6 7.6 0 0 1 10.4 5L12 2.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>',
+};
+
+function render() {
+  const app = document.getElementById("app");
+  document.body.style.overflow = S.scan ? "hidden" : "";
+  if (!S.profile) { app.innerHTML = viewSetup(); return; }
+  if (!S.selectedDay) S.selectedDay = S.today;
+  let page;
+  if (S.tab === "plan") page = viewPlan();
+  else if (S.tab === "settings") page = viewSettings();
+  else page = viewHome();
+  app.innerHTML = `
+    <main>${page}</main>
+    <nav>
+      <a class="${S.tab === "home" ? "on" : ""}" onclick="go('home')">${NAV_ICONS.home}Home</a>
+      <a class="${S.tab === "plan" ? "on" : ""}" onclick="go('plan')">${NAV_ICONS.plan}My Plan</a>
+      <button class="fab" onclick="openScan()" aria-label="Scan food">+</button>
+      <a class="${S.tab === "settings" ? "on" : ""}" onclick="go('settings')">${NAV_ICONS.settings}Settings</a>
+      <span style="width:52px"></span>
+    </nav>
+    ${S.scan ? viewScan() : ""}`;
+}
+function go(tab) { S.tab = tab; render(); }
+
+/* ---------- setup (first run) ---------- */
+function viewSetup() {
+  return `<main style="display:flex;flex-direction:column;min-height:100dvh;padding-bottom:32px">
+    <div style="text-align:center;margin:48px 0 8px">
+      <div style="font-size:52px">🍎</div>
+      <h1 style="font-size:28px;margin-top:12px">CalTracker</h1>
+      <p class="ink2" style="font-size:14px;margin-top:6px">Snap a photo — AI logs your calories & macros<br/>toward your get-lean goals.</p>
+    </div>
+    <div class="card" style="padding:20px;margin-top:20px">
+      <h2>Your details</h2>
+      <p class="muted" style="margin-top:2px">Pre-filled with your stats — used to compute your personal plan.</p>
+      <label>Sex</label>
+      <div class="seg" id="sexSeg">
+        <button class="on" data-v="male" onclick="pickSeg('sexSeg',this)">Male</button>
+        <button data-v="female" onclick="pickSeg('sexSeg',this)">Female</button>
+      </div>
+      <div class="row">
+        <div><label for="age">Age</label><input id="age" type="number" inputmode="numeric" value="25" /></div>
+        <div><label for="height">Height (cm)</label><input id="height" type="number" inputmode="numeric" value="172" /></div>
+        <div><label for="weight">Weight (kg)</label><input id="weight" type="number" inputmode="decimal" value="58" /></div>
+      </div>
+      <label>Training / activity</label>
+      <div class="seg" id="actSeg" style="flex-wrap:wrap">
+        ${Object.entries(ACTIVITY).map(([k, a], i) =>
+          `<button style="flex-basis:47%" class="${k === "moderate" ? "on" : ""}" data-v="${k}" onclick="pickSeg('actSeg',this)">${a.label}<br/><span style="font-weight:400;font-size:11px">${a.hint}</span></button>`).join("")}
+      </div>
+      <p class="err" id="setupErr" hidden>Enter a valid age (10–100), height (90–250 cm) and weight (25–350 kg).</p>
+      <button class="btn" style="margin-top:18px" onclick="finishSetup()">Build my plan →</button>
+    </div>
+    <p class="muted" style="text-align:center;margin-top:14px">Goal: get lean — visible abs & muscle definition.<br/>You'll see your research-based targets next.</p>
+  </main>`;
+}
+function pickSeg(id, btn) {
+  document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.remove("on"));
+  btn.classList.add("on");
+}
+function segVal(id) { return document.querySelector(`#${id} button.on`)?.dataset.v; }
+function finishSetup() {
+  const age = +document.getElementById("age").value;
+  const heightCm = +document.getElementById("height").value;
+  const weightKg = +document.getElementById("weight").value;
+  const ok = age >= 10 && age <= 100 && heightCm >= 90 && heightCm <= 250 && weightKg >= 25 && weightKg <= 350;
+  document.getElementById("setupErr").hidden = ok;
+  if (!ok) return;
+  S.profile = { sex: segVal("sexSeg"), age, heightCm, weightKg, activity: segVal("actSeg"), mode: "recomp" };
+  applyPlanAsGoals();
+  S.tab = "plan";
+  save(); render();
+}
+
+/* ---------- home ---------- */
+function viewHome() {
+  const g = S.goals, t = totalsFor(S.selectedDay);
+  const left = Math.round(g.calories - t.calories);
+  const logs = logsFor(S.selectedDay);
+  const days = [];
+  for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(d); }
+  const letters = ["S","M","T","W","T","F","S"];
+  const macros = [
+    ["Protein", t.protein_g, g.protein_g, "var(--protein)"],
+    ["Carbs", t.carbs_g, g.carbs_g, "var(--carbs)"],
+    ["Fat", t.fat_g, g.fat_g, "var(--fat)"],
+  ];
+  return `
+    <header style="display:flex;justify-content:space-between;align-items:center">
+      <h1>CalTracker</h1>
+      <div class="card" style="border-radius:999px;padding:6px 12px;font-size:14px;font-weight:700">🔥 ${streak()}</div>
+    </header>
+    <div class="stat-strip" style="margin-top:18px">
+      ${days.map((d) => {
+        const k = localDate(d);
+        return `<button class="day ${k === S.selectedDay ? "sel" : ""} ${k === S.today ? "today" : ""}" onclick="pickDay('${k}')">
+          <span class="muted" style="font-weight:600">${letters[d.getDay()]}</span><span class="num">${d.getDate()}</span></button>`;
+      }).join("")}
+    </div>
+    <section class="card" style="display:flex;justify-content:space-between;align-items:center;padding:24px;margin-top:18px">
+      <div>
+        <div style="font-size:36px;font-weight:800;letter-spacing:-0.02em">${fmt(Math.abs(left))}</div>
+        <div class="ink2" style="font-size:13px;margin-top:2px">${left < 0 ? "Calories over" : "Calories left"}</div>
+      </div>
+      ${ring(100, 10, g.calories > 0 ? t.calories / g.calories : 0, left < 0 ? "var(--danger)" : "var(--ink)", "#f0efec",
+        `<span style="font-size:24px">${left < 0 ? "⚠️" : "🔥"}</span>`)}
+    </section>
+    <div class="row" style="margin-top:12px">
+      ${macros.map(([label, val, goal, color]) => {
+        const rem = Math.round(goal - val);
+        return `<div class="card" style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:16px 8px">
+          <div style="font-size:17px;font-weight:700">${fmt(Math.abs(rem))}g</div>
+          <div class="ink2" style="font-size:11px;margin-top:-4px">${label} ${rem < 0 ? "over" : "left"}</div>
+          ${ring(52, 6, goal > 0 ? val / goal : 0, color, tint(color, 14), `<span class="dot" style="background:${color};width:9px;height:9px"></span>`)}
+        </div>`;
+      }).join("")}
+    </div>
+    ${viewProteinFocus(t)}
+    <section style="margin-top:22px">
+      <h2 style="margin-bottom:10px">${S.selectedDay === S.today ? "Eaten today" : "Eaten this day"}</h2>
+      ${logs.length ? `<div style="display:flex;flex-direction:column;gap:10px">${logs.map(viewLogItem).join("")}</div>`
+        : `<div style="border:1.5px dashed rgba(11,11,11,0.15);border-radius:24px;padding:32px;text-align:center">
+            <div style="font-size:28px">🍽️</div>
+            <div class="ink2" style="font-size:13px;font-weight:600;margin-top:6px">Nothing logged yet</div>
+            <div class="muted" style="margin-top:4px">Tap <b style="color:var(--ink)">+</b> to scan a meal — it logs automatically</div>
+          </div>`}
+    </section>
+    ${viewWeekChart()}`;
+}
+function pickDay(k) { S.selectedDay = k; render(); }
+/* Protein is the #1 lever for a lean recomp — surface it separately. */
+function viewProteinFocus(t) {
+  const g = S.goals;
+  const pct = g.protein_g > 0 ? Math.min(1, t.protein_g / g.protein_g) : 0;
+  return `<section class="card" style="padding:16px 20px;margin-top:12px">
+    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600">
+      <span>💪 Protein target (muscle retention)</span>
+      <span class="ink2">${fmt(t.protein_g)} / ${fmt(g.protein_g)} g</span>
+    </div>
+    <div class="meter" style="background:${tint("#e34948", 14)};margin-top:8px"><div style="width:${pct * 100}%;background:var(--protein)"></div></div>
+    <div class="muted" style="margin-top:6px">${pct >= 1 ? "Target hit — great for keeping muscle while getting lean ✓"
+      : `${fmt(g.protein_g - t.protein_g)} g to go — aim for ~${computePlan(S.profile).proteinPerMeal} g per meal`}</div>
+  </section>`;
+}
+function viewLogItem(log) {
+  const open = S.expandedLog === log.id;
+  return `<div class="card" style="overflow:hidden">
+    <div class="list-item" onclick="toggleLog('${log.id}')">
+      ${log.photo ? `<img class="thumb" src="${esc(log.photo)}" alt=""/>` : `<span class="thumb">${esc(log.emoji || "🍽️")}</span>`}
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <span style="font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(log.name)}</span>
+          <span class="muted" style="flex-shrink:0">${new Date(log.loggedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+        </div>
+        <div class="ink2" style="font-size:13px;font-weight:600;margin-top:2px">${fmt(log.calories)} kcal</div>
+        <div style="display:flex;gap:12px;margin-top:4px;font-size:11px" class="ink2">
+          <span><span class="dot" style="background:var(--protein);width:6px;height:6px"></span> P ${fmt(log.protein_g)}g</span>
+          <span><span class="dot" style="background:var(--carbs);width:6px;height:6px"></span> C ${fmt(log.carbs_g)}g</span>
+          <span><span class="dot" style="background:var(--fat);width:6px;height:6px"></span> F ${fmt(log.fat_g)}g</span>
+        </div>
+      </div>
+    </div>
+    ${open ? `<div style="border-top:1px solid rgba(11,11,11,0.06);padding:12px 16px">
+      ${(log.items || []).map((it) => `<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px" class="ink2">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}${it.quantity ? " · " + esc(it.quantity) : ""}</span>
+        <span style="font-weight:600;flex-shrink:0">${fmt(it.calories)} kcal</span></div>`).join("")}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+        <span class="muted">Health score <b style="color:var(--ink)">${log.health_score}/10</b></span>
+        <button onclick="event.stopPropagation();delLog('${log.id}')" style="border:0;font:inherit;font-size:12px;font-weight:700;cursor:pointer;border-radius:999px;padding:8px 12px;${S.confirmDel === log.id ? "background:var(--danger);color:#fff" : "background:none;color:var(--danger)"}">
+          ${S.confirmDel === log.id ? "Tap to confirm" : "Delete"}</button>
+      </div>
+    </div>` : ""}
+  </div>`;
+}
+function toggleLog(id) { S.expandedLog = S.expandedLog === id ? null : id; S.confirmDel = null; render(); }
+function delLog(id) {
+  if (S.confirmDel === id) { S.logs = S.logs.filter((l) => l.id !== id); S.confirmDel = null; save(); }
+  else S.confirmDel = id;
+  render();
+}
+function viewWeekChart() {
+  const g = S.goals;
+  const days = [], vals = [];
+  for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(d); vals.push(Math.round(totalsFor(localDate(d)).calories)); }
+  const rawMax = Math.max(g.calories, ...vals) * 1.05;
+  let yMax = 1000; const pow = Math.pow(10, Math.floor(Math.log10(rawMax || 1)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * pow >= rawMax) { yMax = m * pow; break; }
+  const W = 340, H = 170, L = 38, R = 10, T = 16, B = 24, plotW = W - L - R, plotH = H - T - B, band = plotW / 7;
+  const y = (v) => T + plotH * (1 - v / yMax);
+  const letters = ["S","M","T","W","T","F","S"];
+  let bars = "";
+  vals.forEach((v, i) => {
+    const cx = L + band * i + band / 2, bw = 22, bx = cx - bw / 2, top = y(v), bh = Math.max(0, H - B - top), r = Math.min(4, bh);
+    const isToday = i === 6;
+    if (bh > 0) bars += `<path d="M ${bx} ${H - B} L ${bx} ${top + r} Q ${bx} ${top} ${bx + r} ${top} L ${bx + bw - r} ${top} Q ${bx + bw} ${top} ${bx + bw} ${top + r} L ${bx + bw} ${H - B} Z" fill="#0b0b0b"/>`;
+    if (isToday && v > 0) bars += `<text x="${cx}" y="${top - 5}" text-anchor="middle" font-size="9.5" font-weight="700" fill="#0b0b0b">${v.toLocaleString()}</text>`;
+    bars += `<text x="${cx}" y="${H - 7}" text-anchor="middle" font-size="9.5" fill="${isToday ? "#0b0b0b" : "#898781"}" font-weight="${isToday ? 700 : 400}">${letters[days[i].getDay()]}</text>`;
+  });
+  const ticks = [0, yMax / 2, yMax].map((t) =>
+    `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="#e1e0d9" stroke-width="1"/>
+     <text x="${L - 6}" y="${y(t) + 3.5}" text-anchor="end" font-size="9" fill="#898781">${t >= 1000 ? (t / 1000).toLocaleString() + "k" : t}</text>`).join("");
+  return `<section class="card" style="padding:20px;margin-top:14px">
+    <h2>This week</h2>
+    <p class="muted" style="margin:2px 0 10px">Daily calories vs your ${fmt(g.calories)} kcal target</p>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%" role="img" aria-label="Calories per day, last 7 days">
+      ${ticks}
+      <line x1="${L}" x2="${W - R}" y1="${y(g.calories)}" y2="${y(g.calories)}" stroke="#c3c2b7" stroke-width="1"/>
+      <text x="${W - R}" y="${y(g.calories) - 4}" text-anchor="end" font-size="9" fill="#898781">Goal</text>
+      ${bars}
+      <line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="#c3c2b7" stroke-width="1"/>
+    </svg>
+  </section>`;
+}
+
+/* ---------- plan ---------- */
+function viewPlan() {
+  const p = S.profile, plan = computePlan(p);
+  const goalsMatch = S.goals && S.goals.calories === plan.calories && S.goals.protein_g === plan.protein_g;
+  return `
+    <header><h1>My Plan</h1>
+      <p class="ink2" style="font-size:13px;margin-top:4px">Goal: <b>lean & defined — visible abs and muscle</b>. Targets below are computed for
+      <b>${p.heightCm} cm / ${p.weightKg} kg</b> (${p.sex}, ${p.age}) from peer-reviewed sports-nutrition research.</p>
+    </header>
+    <div class="seg" style="margin-top:14px">
+      ${Object.entries(MODES).map(([k, m]) =>
+        `<button class="${p.mode === k ? "on" : ""}" onclick="setMode('${k}')">${m.label}</button>`).join("")}
+    </div>
+    <p class="muted" style="margin-top:8px">${MODES[p.mode].hint}.</p>
+
+    <section class="card" style="padding:20px;margin-top:14px;text-align:center">
+      <div class="muted">Daily calorie target</div>
+      <div style="font-size:44px;font-weight:800;letter-spacing:-0.02em;margin-top:2px">${fmt(plan.calories)}</div>
+      <div class="muted">kcal / day &nbsp;·&nbsp; maintenance ≈ ${fmt(plan.tdee)} kcal (BMR ${fmt(plan.bmr)} × activity)</div>
+    </section>
+
+    <div class="row" style="margin-top:10px">
+      <div class="card" style="padding:16px;text-align:center">
+        <span class="dot" style="background:var(--protein)"></span>
+        <div class="plan-num" style="margin-top:6px">${plan.protein_g}g</div>
+        <div class="muted">Protein · 2.0 g/kg</div>
+      </div>
+      <div class="card" style="padding:16px;text-align:center">
+        <span class="dot" style="background:var(--carbs)"></span>
+        <div class="plan-num" style="margin-top:6px">${plan.carbs_g}g</div>
+        <div class="muted">Carbs · fuels training</div>
+      </div>
+      <div class="card" style="padding:16px;text-align:center">
+        <span class="dot" style="background:var(--fat)"></span>
+        <div class="plan-num" style="margin-top:6px">${plan.fat_g}g</div>
+        <div class="muted">Fat · 0.9 g/kg</div>
+      </div>
+    </div>
+
+    ${goalsMatch
+      ? `<div class="banner" style="margin-top:10px">✓ These targets are set as your daily goals — every scanned meal counts toward them automatically.</div>`
+      : `<button class="btn" style="margin-top:10px" onclick="applyPlanAsGoals();render()">Set these as my daily goals</button>`}
+
+    <section class="card" style="padding:20px;margin-top:14px">
+      <h2>Why these numbers</h2>
+      <div style="font-size:13px;line-height:1.65;margin-top:8px" class="ink2">
+        <p><b style="color:var(--ink)">You don't need a big cut.</b> At ${p.weightKg} kg / ${p.heightCm} cm (BMI ${(p.weightKg / ((p.heightCm / 100) ** 2)).toFixed(1)}), you're already light — visible abs come from <b>building muscle while slowly reducing body fat</b> ("recomposition"), not aggressive dieting, which costs lean mass at low body weight.</p>
+        <p style="margin-top:8px"><b style="color:var(--ink)">Protein ${plan.protein_g} g/day (2.0 g/kg).</b> A meta-analysis of 49 trials found protein up to ~1.6 g/kg maximizes muscle gain with training, and reviews of lean athletes in a deficit support the higher 1.8–2.7 g/kg range to protect muscle — 2.0 g/kg sits safely in that window. Spread it over ~4 meals of ≈${plan.proteinPerMeal} g.</p>
+        <p style="margin-top:8px"><b style="color:var(--ink)">Calories ${fmt(plan.calories)}/day.</b> ${p.mode === "recomp" ? "≈10% below maintenance — studies in athletes show slower deficits preserve muscle far better than aggressive ones." : p.mode === "cut" ? "≈20% below maintenance — targets ~0.5% body-weight loss per week, the upper rate shown to preserve lean mass in athletes." : "A small ~200 kcal surplus — enough to build muscle while keeping fat gain minimal."}</p>
+        <p style="margin-top:8px"><b style="color:var(--ink)">Fat ${plan.fat_g} g (0.9 g/kg)</b> supports hormone production; <b style="color:var(--ink)">carbs ${plan.carbs_g} g</b> fill the rest to fuel your lifting sessions.</p>
+      </div>
+    </section>
+
+    <section class="card" style="padding:20px;margin-top:10px">
+      <h2>The rest of the equation</h2>
+      <div style="font-size:13px;line-height:1.7;margin-top:8px" class="ink2">
+        <p>🏋️ <b style="color:var(--ink)">Lift 3–5×/week, progressively.</b> Abs become visible through low body fat <i>plus</i> developed muscle — resistance training is what tells your body to keep/build muscle while lean.</p>
+        <p style="margin-top:6px">📉 <b style="color:var(--ink)">Rate check:</b> if cutting, lose no more than ~0.3–0.6 kg/week at your size. Slower = more muscle kept.</p>
+        <p style="margin-top:6px">🌾 <b style="color:var(--ink)">Fiber ≈ ${plan.fiber_g} g/day</b> (14 g per 1,000 kcal) and 💧 <b style="color:var(--ink)">water ≈ ${(plan.water_ml / 1000).toFixed(1)} L/day</b> baseline, more around training.</p>
+        <p style="margin-top:6px">😴 <b style="color:var(--ink)">Sleep 7–9 h.</b> Short sleep shifts weight loss from fat toward muscle.</p>
+        <p style="margin-top:6px">💊 <b style="color:var(--ink)">Optional:</b> creatine monohydrate 3–5 g/day is the best-evidenced safe supplement for strength and lean mass.</p>
+      </div>
+    </section>
+
+    <section class="card" style="padding:20px;margin-top:10px">
+      <h2>Sources</h2>
+      <p class="refs" style="margin-top:8px">
+        Mifflin et al. 1990, <i>Am J Clin Nutr</i> (BMR equation) · Morton et al. 2018, <i>Br J Sports Med</i> (protein meta-analysis, 49 RCTs) ·
+        Helms et al. 2014, <i>JISSN</i> (lean-athlete contest-prep review) · Jäger et al. 2017, ISSN Position Stand: Protein ·
+        Garthe et al. 2011, <i>IJSNEM</i> (slow vs fast weight loss in athletes) · Schoenfeld &amp; Aragon 2018, <i>JISSN</i> (per-meal protein distribution) ·
+        Institute of Medicine DRI (fiber) · EFSA 2010 (water) · Kreider et al. 2017, ISSN Position Stand: Creatine ·
+        Nedeltcheva et al. 2010, <i>Ann Intern Med</i> (sleep &amp; body composition).
+      </p>
+      <p class="muted" style="margin-top:10px">Estimates for a healthy adult — not medical advice. Adjust with how your body responds (weekly averages of weight + mirror + gym performance).</p>
+    </section>`;
+}
+function setMode(mode) {
+  S.profile.mode = mode;
+  applyPlanAsGoals();
+  render();
+}
+
+/* ---------- settings ---------- */
+function viewSettings() {
+  const p = S.profile;
+  return `
+    <header><h1>Settings</h1></header>
+    <section class="card" style="padding:20px;margin-top:16px">
+      <h2>Anthropic API key</h2>
+      <p class="muted" style="margin-top:4px">Powers the photo analysis. Stored only in this browser — get one at <b>platform.claude.com</b>.</p>
+      <input id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(S.apiKey)}" style="margin-top:10px" autocomplete="off"/>
+      <button class="btn" style="margin-top:10px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
+      <p class="muted" id="keyMsg" style="margin-top:8px">${S.apiKey ? "✓ Key saved — scanning is enabled." : "⚠️ No key yet — scanning won't work until you add one."}</p>
+    </section>
+    <section class="card" style="padding:20px;margin-top:12px">
+      <h2>Profile</h2>
+      <div class="ink2" style="font-size:13px;margin-top:8px;line-height:1.8">
+        ${p.sex}, ${p.age} · ${p.heightCm} cm · ${p.weightKg} kg · ${ACTIVITY[p.activity].label} · ${MODES[p.mode].label}
+      </div>
+      <label for="w2">Update weight (kg) — targets recalculate</label>
+      <input id="w2" type="number" inputmode="decimal" value="${p.weightKg}"/>
+      <button class="btn ghost" style="margin-top:10px" onclick="updateWeight()">Save weight</button>
+      <button class="btn ghost" style="margin-top:8px" onclick="redoSetup()">Redo full setup</button>
+    </section>
+    <section class="card" style="padding:20px;margin-top:12px">
+      <h2>About</h2>
+      <p class="muted" style="margin-top:6px;line-height:1.6">CalTracker analyzes food photos with Claude's vision AI (${MODEL}). Nutrition values are estimates — not medical advice. All data lives in this browser.</p>
+    </section>
+    <section class="card" style="padding:20px;margin-top:12px;text-align:center">
+      <button onclick="wipeAll()" style="border:0;background:none;font:inherit;font-size:14px;font-weight:700;color:var(--danger);cursor:pointer;padding:6px 12px">
+        ${S.confirmWipe ? "Tap again to delete everything" : "Delete all data"}</button>
+    </section>`;
+}
+function saveKey() {
+  S.apiKey = document.getElementById("apiKey").value.trim();
+  save(); render();
+}
+function updateWeight() {
+  const w = +document.getElementById("w2").value;
+  if (!(w >= 25 && w <= 350)) return;
+  S.profile.weightKg = w;
+  applyPlanAsGoals(); save(); render();
+}
+function redoSetup() { S.profile = null; save(); render(); }
+function wipeAll() {
+  if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
+  localStorage.removeItem(KEY);
+  S.profile = null; S.goals = null; S.logs = []; S.apiKey = ""; S.confirmWipe = false;
+  render();
+}
+
+/* ---------- scan sheet ---------- */
+function viewScan() {
+  const sc = S.scan;
+  let body = "";
+  if (sc.stage === "input") {
+    body = sc.describeMode
+      ? `<div class="center-col">
+          <div class="card" style="padding:20px">
+            <h2>Describe your meal</h2>
+            <textarea id="descInput" rows="4" placeholder="e.g. Grilled chicken breast with rice and avocado" style="margin-top:10px;font-weight:400">${esc(sc.description)}</textarea>
+            <div class="row" style="margin-top:12px">
+              <button class="btn ghost" onclick="S.scan.describeMode=false;render()">Back</button>
+              <button class="btn" onclick="S.scan.description=document.getElementById('descInput').value;onDescribe()">Analyze</button>
+            </div>
+          </div>
+        </div>`
+      : `<div class="center-col">
+          <button class="card" style="border:1px solid rgba(11,11,11,0.08);padding:32px;cursor:pointer;font:inherit;text-align:center" onclick="document.getElementById('cameraInput').click()">
+            <div style="width:64px;height:64px;border-radius:999px;background:var(--ink);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:26px">📷</div>
+            <div style="font-size:16px;font-weight:700;margin-top:12px">Take a photo</div>
+            <div class="muted" style="margin-top:4px">AI analyzes & logs it automatically</div>
+          </button>
+          <button class="card" style="border:1px solid rgba(11,11,11,0.08);padding:16px;cursor:pointer;font:inherit;font-weight:600;font-size:14px" onclick="document.getElementById('galleryInput').click()">🖼️ &nbsp;Choose from gallery</button>
+          <button class="card" style="border:1px solid rgba(11,11,11,0.08);padding:16px;cursor:pointer;font:inherit;font-weight:600;font-size:14px" onclick="S.scan.describeMode=true;render()">✏️ &nbsp;Describe your food</button>
+          ${!S.apiKey ? `<p class="err" style="text-align:center">No API key yet — add it in Settings first.</p>` : ""}
+        </div>`;
+  } else if (sc.stage === "analyzing") {
+    body = `<div class="center-col" style="align-items:center;text-align:center">
+      ${sc.thumb ? `<div style="position:relative"><img src="${esc(sc.thumb)}" alt="Your meal" style="width:224px;height:224px;border-radius:24px;object-fit:cover"/><div class="shimmer" style="position:absolute;inset:0;border-radius:24px"></div></div>`
+        : `<div class="shimmer" style="width:224px;height:224px;border-radius:24px"></div>`}
+      <div><div style="font-weight:700">Analyzing your food…</div>
+      <div class="muted" style="margin-top:4px">Estimating calories, protein, carbs & fat</div></div>
+    </div>`;
+  } else if (sc.stage === "error") {
+    body = `<div class="center-col" style="align-items:center;text-align:center">
+      <div style="font-size:40px">😕</div>
+      <p class="ink2" style="font-size:14px;font-weight:500;max-width:280px">${esc(sc.error)}</p>
+      <button class="btn small" onclick="S.scan.stage='input';S.scan.error='';render()">Try again</button>
+    </div>`;
+  } else if (sc.stage === "result") {
+    body = viewResult(sc);
+  }
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-label="Scan food">
+    <div class="sheet-head">
+      <h2 style="font-size:17px">${sc.stage === "result" ? "Results" : "Scan food"}</h2>
+      <button class="xbtn" onclick="closeScan()" aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">${body}</div>
+  </div>`;
+}
+function viewResult(sc) {
+  const a = sc.analysis;
+  if (!a.is_food) {
+    return `<div class="center-col" style="align-items:center;text-align:center">
+      <div style="font-size:40px">🤔</div>
+      <div style="font-weight:700">That doesn't look like food</div>
+      <p class="ink2" style="font-size:13px;max-width:280px">${esc(a.notes || "Try a clearer photo of your meal.")}</p>
+      <button class="btn small" onclick="S.scan.stage='input';render()">Try again</button>
+    </div>`;
+  }
+  const g = S.goals, t = totalsFor(S.today);
+  const hs = a.health_score, hColor = hs >= 7 ? "var(--good)" : hs >= 4 ? "var(--warn)" : "var(--danger)";
+  const macros = [["Protein", a.protein_g, "var(--protein)"], ["Carbs", a.carbs_g, "var(--carbs)"], ["Fat", a.fat_g, "var(--fat)"]];
+  return `<div style="display:flex;flex-direction:column;gap:12px;padding-top:4px">
+    ${sc.logId ? `<div class="banner">✓ Logged automatically — today: ${fmt(t.calories)} / ${fmt(g.calories)} kcal · protein ${fmt(t.protein_g)} / ${fmt(g.protein_g)} g</div>` : ""}
+    <div class="card" style="overflow:hidden">
+      ${sc.thumb ? `<img src="${esc(sc.thumb)}" alt="Your meal" style="width:100%;height:176px;object-fit:cover"/>` : ""}
+      <div style="padding:20px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <div style="font-size:17px;font-weight:700;line-height:1.3">${esc(a.emoji)} ${esc(a.food_name)}</div>
+            <div class="muted" style="margin-top:4px;text-transform:capitalize">${esc(a.confidence)} confidence</div>
+          </div>
+          <div style="text-align:right"><div style="font-size:24px;font-weight:800">${fmt(a.calories)}</div><div class="muted">kcal</div></div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          ${macros.map(([label, val, color]) => `<div style="background:var(--page);border-radius:16px;padding:10px 12px">
+            <div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${color};width:7px;height:7px"></span><span class="ink2" style="font-size:11px">${label}</span></div>
+            <div style="font-size:14px;font-weight:700;margin-top:3px">${fmt(val)}g</div></div>`).join("")}
+        </div>
+        <div style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;font-size:12px"><span class="ink2">Health score</span><b>${hs}/10</b></div>
+          <div class="meter" style="background:${tint("#0ca30c", 15)};margin-top:6px"><div style="width:${hs * 10}%;background:${hColor}"></div></div>
+        </div>
+      </div>
+    </div>
+    ${a.items.length ? `<div class="card" style="padding:20px">
+      <h2 style="font-size:14px">In this meal</h2>
+      <div style="margin-top:10px">${a.items.map((it) => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:7px">
+        <span class="ink2" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}${it.quantity ? ` <span class="muted">· ${esc(it.quantity)}</span>` : ""}</span>
+        <b style="flex-shrink:0">${fmt(it.calories)} kcal</b></div>`).join("")}</div>
+      ${a.notes ? `<p class="muted" style="border-top:1px solid rgba(11,11,11,0.06);padding-top:10px;margin-top:6px">${esc(a.notes)}</p>` : ""}
+    </div>` : ""}
+    <div class="card" style="padding:20px">
+      <label for="fixInput" style="margin:0 0 8px">✨ Fix results <span class="muted" style="font-weight:400">— updates the logged entry</span></label>
+      <input id="fixInput" placeholder="e.g. it was a double portion / no dressing" value="${esc(sc.keepFixText || "")}" ${sc.fixing ? "disabled" : ""} onkeydown="if(event.key==='Enter')onFix()"/>
+      ${sc.error ? `<p class="err">${esc(sc.error)}</p>` : ""}
+      <button class="btn" style="margin-top:10px" onclick="onFix()" ${sc.fixing ? "disabled" : ""}>${sc.fixing ? "Updating…" : "Update analysis"}</button>
+    </div>
+    <div class="row" style="padding-bottom:8px">
+      <button class="btn ghost" onclick="onRemoveScanned()" ${sc.fixing ? "disabled" : ""}>Remove log</button>
+      <button class="btn" style="flex:2" onclick="closeScan()" ${sc.fixing ? "disabled" : ""}>Done ✓</button>
+    </div>
+  </div>`;
+}
+
+/* file inputs */
+document.getElementById("cameraInput").addEventListener("change", (e) => { onFilePicked(e.target.files?.[0]); e.target.value = ""; });
+document.getElementById("galleryInput").addEventListener("change", (e) => { onFilePicked(e.target.files?.[0]); e.target.value = ""; });
+
+/* boot */
+load();
+render();
+</script>
+</body>
+</html>
