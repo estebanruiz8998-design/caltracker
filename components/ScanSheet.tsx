@@ -84,6 +84,7 @@ export default function ScanSheet({ onClose }: { onClose: () => void }) {
   async function handleFix(correction: string) {
     if (!analysis) return;
     setFixing(true);
+    setError("");
     try {
       const result = await callAnalyze({
         ...(imageBase64
