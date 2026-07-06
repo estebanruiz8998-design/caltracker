@@ -181,18 +181,29 @@ const CONFIG = {
     activity: "moderate", // sedentary | light | moderate | active | very_active
     mode: "recomp",       // "recomp" (get lean) | "cut" | "bulk"
   },
+  // Which Claude model analyzes your photos (changeable in Settings):
+  //   "claude-haiku-4-5"  ≈ $0.005/scan — cheapest, great for everyday logging
+  //   "claude-sonnet-5"   ≈ $0.01/scan  — balanced
+  //   "claude-opus-4-8"   ≈ $0.03/scan  — most accurate portion estimates
+  MODEL: "claude-haiku-4-5",
 };
 /* ═══════════════════════════════════════════════════════════════ */
 
 /* ============================== state ============================== */
 const KEY = "caltracker:standalone:v1";
-const MODEL = "claude-opus-4-8";
+const MODELS = {
+  "claude-haiku-4-5": { label: "Budget — Haiku 4.5", hint: "≈ $0.005 per scan · a few dollars lasts months" },
+  "claude-sonnet-5": { label: "Balanced — Sonnet 5", hint: "≈ $0.01 per scan · sharper on mixed plates" },
+  "claude-opus-4-8": { label: "Best — Opus 4.8", hint: "≈ $0.03 per scan · most accurate portions" },
+};
+const DEFAULT_MODEL = MODELS[CONFIG.MODEL] ? CONFIG.MODEL : "claude-haiku-4-5";
 
 const S = {
   profile: null,          // {sex, age, heightCm, weightKg, activity, mode}
   goals: null,            // {calories, protein_g, carbs_g, fat_g}
   logs: [],
   apiKey: "",
+  model: null,            // resolved in load()
   tab: "home",            // home | analytics | plan | settings
   selectedDay: null,
   scan: null,
@@ -227,12 +238,14 @@ function load() {
     S.goals = raw.goals || null;
     S.logs = Array.isArray(raw.logs) ? raw.logs : [];
     S.apiKey = raw.apiKey || "";
+    S.model = MODELS[raw.model] ? raw.model : null;
   } catch (e) { /* corrupted storage — start fresh */ }
-  // Baked-in key: used whenever no key has been saved in this browser.
+  // Baked-in fallbacks: used whenever nothing has been saved in this browser.
   if (!S.apiKey && CONFIG.API_KEY) S.apiKey = CONFIG.API_KEY;
+  if (!S.model) S.model = DEFAULT_MODEL;
 }
 function save() {
-  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey };
+  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey, model: S.model };
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch (e) {
     try { data.logs = data.logs.map(({ photo, ...rest }) => rest); localStorage.setItem(KEY, JSON.stringify(data)); }
@@ -414,8 +427,9 @@ async function analyzeWithClaude({ imageB64, description, correction, previous }
       "anthropic-dangerous-direct-browser-access": "true",
     },
     body: JSON.stringify({
-      model: MODEL, max_tokens: 16000,
-      thinking: { type: "adaptive" },
+      model: S.model, max_tokens: 16000,
+      // adaptive thinking is a 4.6+/5-family parameter; Haiku 4.5 rejects it
+      ...(S.model === "claude-haiku-4-5" ? {} : { thinking: { type: "adaptive" } }),
       system: SYSTEM_PROMPT,
       output_config: { format: { type: "json_schema", schema: SCHEMA } },
       messages: [{ role: "user", content }],
@@ -425,9 +439,11 @@ async function analyzeWithClaude({ imageB64, description, correction, previous }
     let msg = "Analysis failed. Please try again.";
     try {
       const err = await res.json();
+      const apiMsg = err?.error?.message || "";
       if (res.status === 401) msg = "Invalid API key — check it in Settings.";
       else if (res.status === 429) msg = "Rate limited — wait a moment and try again.";
-      else if (err?.error?.message) msg = err.error.message.slice(0, 160);
+      else if (/credit balance/i.test(apiMsg)) msg = "Your API account is out of credits. Add a few dollars at platform.claude.com → Billing (on the Budget model that's months of scans).";
+      else if (apiMsg) msg = apiMsg.slice(0, 160);
     } catch (e) { /* keep generic */ }
     throw new Error(msg);
   }
@@ -958,6 +974,17 @@ function viewSettings() {
         : "⚠️ No key yet — scanning won't work until you add one. Tip: paste it into the CONFIG block at the top of index.html to make it permanent on every device."}</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
+      <h2 style="font-size:14px">AI model</h2>
+      <p class="muted" style="margin-top:4px">All three are accurate for everyday logging — pick by cost. Charged to your API credits per scan.</p>
+      <div style="margin-top:12px">
+        ${Object.entries(MODELS).map(([id, m]) => `
+          <button class="opt ${S.model === id ? "on" : ""}" style="margin-bottom:8px" onclick="setModel('${id}')">
+            <span><span class="t">${m.label}</span><span class="h">${m.hint}</span></span>
+            ${S.model === id ? "<span>✓</span>" : ""}
+          </button>`).join("")}
+      </div>
+    </section>
+    <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">Your details</h2>
       <dl style="margin-top:12px;font-size:14px">
         ${[["Sex", p.sex], ["Age", p.age], ["Height", p.heightCm + " cm"], ["Weight", p.weightKg + " kg"], ["Goal", MODES[p.mode].label]]
@@ -972,7 +999,7 @@ function viewSettings() {
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">About</h2>
-      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with Claude's vision AI (${MODEL}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
+      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with Claude's vision AI (${esc(S.model)}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px;text-align:center">
       <button onclick="wipeAll()" style="border:0;background:none;font:inherit;font-size:14px;font-weight:700;color:var(--danger);cursor:pointer;padding:6px 12px">
@@ -980,6 +1007,7 @@ function viewSettings() {
     </section>`;
 }
 function saveKey() { S.apiKey = document.getElementById("apiKey").value.trim(); save(); render(); }
+function setModel(id) { if (MODELS[id]) { S.model = id; save(); render(); } }
 function updateWeight() {
   const w = +document.getElementById("w2").value;
   if (!(w >= 25 && w <= 350)) return;
@@ -998,7 +1026,7 @@ function redoSetup() {
 function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
-  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "", confirmWipe: false });
+  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "", model: DEFAULT_MODEL, confirmWipe: false });
   OB.step = 0; OB.manual = false;
   render();
 }
