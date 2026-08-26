@@ -74,8 +74,15 @@ A wrong id comes back as a 404 with the same hint.
 
 Which models a key can reach depends on your tier and credits, not on what the
 catalog advertises — and the catalog can't tell you which one is actually good
-at estimating portions from a photo. To settle both, benchmark them against a
-real meal:
+at estimating portions from a photo. To settle both, ask your key directly.
+
+Check that a key works and see what it can reach:
+
+```bash
+NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs
+```
+
+Then benchmark the candidates against a real meal:
 
 ```bash
 NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs meal.jpg --expect 520

@@ -3,7 +3,11 @@
  * Picks the NVIDIA_MODEL for this project by testing candidates on the real
  * task with your own key, rather than trusting a catalog listing.
  *
+ *   NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs
+ *     → verifies the key and lists the vision models it can reach
+ *
  *   NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs path/to/food-photo.jpg
+ *     → also benchmarks each candidate on the real task and ranks them
  *
  * Options
  *   --all              test every model your key lists, not just likely VLMs
@@ -20,19 +24,28 @@ const KEY = process.env.NVIDIA_API_KEY;
 if (!KEY) { console.error("Set NVIDIA_API_KEY first."); process.exit(1); }
 
 const args = process.argv.slice(2);
-const flag = (n, d) => { const i = args.indexOf(n); return i === -1 ? d : args[i + 1]; };
-const photoPath = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1]?.startsWith("--") !== true);
-if (!photoPath || !fs.existsSync(photoPath)) {
-  console.error("Pass a food photo: node scripts/pick-model.mjs meal.jpg");
+const VALUED = new Set(["--expect", "--concurrency"]);
+const opts = {};
+const positional = [];
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (!a.startsWith("--")) { positional.push(a); continue; }
+  opts[a] = VALUED.has(a) ? args[++i] : true;
+}
+const photoPath = positional[0];
+if (photoPath && !fs.existsSync(photoPath)) {
+  console.error(`No such file: ${photoPath}`);
   process.exit(1);
 }
-const TEST_ALL = args.includes("--all");
-const EXPECT = Number(flag("--expect", "")) || null;
-const CONCURRENCY = Math.max(1, Number(flag("--concurrency", "3")) || 3);
+/* No photo → just answer "does this key work, and what can it reach?" */
+const CHECK_ONLY = !photoPath;
+const TEST_ALL = !!opts["--all"];
+const EXPECT = Number(opts["--expect"]) || null;
+const CONCURRENCY = Math.max(1, Number(opts["--concurrency"]) || 3);
 
-const bytes = fs.readFileSync(photoPath);
-const imageB64 = bytes.toString("base64");
-if (bytes.length > 600_000) {
+const bytes = CHECK_ONLY ? null : fs.readFileSync(photoPath);
+const imageB64 = bytes ? bytes.toString("base64") : "";
+if (bytes && bytes.length > 600_000) {
   console.warn(`⚠  ${photoPath} is ${(bytes.length / 1024 | 0)} KB. Some NVIDIA models cap inline images near 180 KB — a smaller photo gives a fairer test.\n`);
 }
 
@@ -117,8 +130,15 @@ async function pool(items, n, fn) {
   return out;
 }
 
-const available = await listModels();
-console.log(`Your key lists ${available.length} models.`);
+let available;
+try {
+  available = await listModels();
+} catch (e) {
+  console.error(`\n✗ Key rejected: ${e.message}`);
+  console.error("  A 401 means the key is invalid or revoked; regenerate it at build.nvidia.com.");
+  process.exit(1);
+}
+console.log(`\n✓ Key works — NVIDIA accepted it and lists ${available.length} models.`);
 
 const candidates = TEST_ALL ? available : available.filter((m) => PREFERRED.includes(m) || LOOKS_VISUAL.test(m));
 if (!candidates.length) {
@@ -129,6 +149,13 @@ candidates.sort((a, b) => {
   const ia = PREFERRED.indexOf(a), ib = PREFERRED.indexOf(b);
   return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
 });
+if (CHECK_ONLY) {
+  console.log(`\n${candidates.length} of them look vision-capable — these are the NVIDIA_MODEL candidates:\n`);
+  for (const m of candidates) console.log(`  ${m}`);
+  console.log(`\nTo find which is actually best at reading portions, rerun with a meal photo:`);
+  console.log(`  node scripts/pick-model.mjs meal.jpg --expect 520`);
+  process.exit(0);
+}
 console.log(`Testing ${candidates.length} vision candidate(s) on ${photoPath}…\n`);
 
 const results = await pool(candidates, CONCURRENCY, async (m) => {
