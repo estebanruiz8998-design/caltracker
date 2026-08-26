@@ -16,7 +16,7 @@
  * defensively. Turn NVIDIA_JSON_MODE on only if your model advertises it.
  */
 
-const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
+export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-90b-vision-instruct";
 const ANTHROPIC_MODELS = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"];
@@ -25,7 +25,7 @@ const ANTHROPIC_MODELS = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-
    stray caller can't run up the bill on a function that has no auth of its own. */
 const MAX_BODY_BYTES = 6 * 1024 * 1024;
 
-const SCHEMA = {
+export const SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["is_food","food_name","emoji","items","calories","protein_g","carbs_g","fat_g","health_score","confidence","notes"],
   properties: {
@@ -45,7 +45,7 @@ const SCHEMA = {
   },
 };
 
-const SYSTEM_PROMPT = `You are the nutrition analysis engine of a photo calorie-tracking app.
+export const SYSTEM_PROMPT = `You are the nutrition analysis engine of a photo calorie-tracking app.
 Given a photo (and/or description) of food, identify the meal and estimate its nutrition accurately.
 - Estimate portions from visual cues (plate size, utensils, packaging).
 - Account for likely cooking oils, dressings and sauces even when not obvious.
@@ -56,7 +56,7 @@ Given a photo (and/or description) of food, identify the meal and estimate its n
 
 /* Claude is held to the schema by output_config; NVIDIA models are not, so they
    get the schema in the prompt instead. */
-const JSON_RULES = `\n\nRespond with a single JSON object and nothing else — no prose, no markdown fences.
+export const JSON_RULES = `\n\nRespond with a single JSON object and nothing else — no prose, no markdown fences.
 It must match this JSON Schema exactly:
 ${JSON.stringify(SCHEMA)}`;
 
@@ -101,7 +101,7 @@ function instructionFor({ imageB64, description, correction, previous }) {
 /* NVIDIA models return JSON wrapped in prose or fences often enough that a
    plain JSON.parse of the whole reply is not safe. Pull out the first balanced
    object instead, tracking string state so braces inside values don't count. */
-function extractJson(text) {
+export function extractJson(text) {
   const trimmed = String(text ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
   try { return JSON.parse(trimmed); } catch { /* fall through to a scan */ }
 

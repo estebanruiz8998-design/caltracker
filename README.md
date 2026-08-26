@@ -72,6 +72,22 @@ https://<your-site>.netlify.app/.netlify/functions/analyze?models=1
 Pick a **vision-capable** id from that list and set it as `NVIDIA_MODEL`.
 A wrong id comes back as a 404 with the same hint.
 
+Which models a key can reach depends on your tier and credits, not on what the
+catalog advertises — and the catalog can't tell you which one is actually good
+at estimating portions from a photo. To settle both, benchmark them against a
+real meal:
+
+```bash
+NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs meal.jpg --expect 520
+```
+
+It lists what your key can reach, filters to vision models, sends each the
+exact request the function sends in production, and ranks the ones that return
+a schema-valid analysis — by closeness to `--expect` when you pass a known
+calorie count, otherwise by detail and latency. It prints the `NVIDIA_MODEL=`
+line to paste into Netlify. Add `--all` to test every listed model, or
+`--concurrency 1` if you get rate limited.
+
 NVIDIA's OpenAI-compatible API has no guaranteed structured-output support —
 it varies per model — so the function asks for JSON in the prompt and parses
 the reply defensively (fenced blocks and surrounding prose are tolerated). If
