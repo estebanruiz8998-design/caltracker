@@ -1,0 +1,8 @@
+# Static single-file app in standalone/, with one serverless function that
+# holds the AI provider key so it never ships to the browser.
+[build]
+  publish = "standalone"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"

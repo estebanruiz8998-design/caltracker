@@ -35,14 +35,63 @@ mobile browsers.
 
 ## Environment
 
-| Variable | Description |
-|---|---|
-| `ANTHROPIC_API_KEY` | Server-side key used by `app/api/analyze/route.ts`. Never exposed to the browser. |
+| Variable | Used by | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | both | Anthropic key. Server-side only; never exposed to the browser. |
+| `NVIDIA_API_KEY` | standalone | NVIDIA key (`nvapi-...`). When set, the function uses NVIDIA instead of Anthropic. |
+| `NVIDIA_MODEL` | standalone | Vision model id. Defaults to `meta/llama-3.2-90b-vision-instruct`. |
+| `NVIDIA_JSON_MODE` | standalone | `off` (default), `json_object`, or `json_schema`. Only turn on if the model supports it. |
+| `AI_PROVIDER` | standalone | Force `nvidia` or `anthropic` when both keys are present. |
+
+## Deploying the standalone app (Netlify)
+
+`standalone/index.html` is a single-file version of the app for static hosting.
+It talks to `netlify/functions/analyze.mjs`, which holds the API key — so the
+key lives in a Netlify environment variable and **never reaches the browser**.
+Baking a key into the HTML would publish it to every visitor.
+
+1. Connect the repo in Netlify. `netlify.toml` already sets `publish` to
+   `standalone/` and `functions` to `netlify/functions/`.
+2. Add your key under **Site configuration → Environment variables**:
+   `NVIDIA_API_KEY` (or `ANTHROPIC_API_KEY`).
+3. Deploy. Settings inside the app shows which provider and model the server
+   picked up.
+
+Rotating the key later is a one-field edit in Netlify — no code change, no
+redeploy of the HTML.
+
+### Choosing an NVIDIA model
+
+The default is a guess at what your account can reach. To see the real list,
+open your deployed function with `?models=1`:
+
+```
+https://<your-site>.netlify.app/.netlify/functions/analyze?models=1
+```
+
+Pick a **vision-capable** id from that list and set it as `NVIDIA_MODEL`.
+A wrong id comes back as a 404 with the same hint.
+
+NVIDIA's OpenAI-compatible API has no guaranteed structured-output support —
+it varies per model — so the function asks for JSON in the prompt and parses
+the reply defensively (fenced blocks and surrounding prose are tolerated). If
+a model reliably supports strict JSON, set `NVIDIA_JSON_MODE=json_object` for
+tighter results. Anthropic doesn't need this: it is held to the schema by
+`output_config.format`.
+
+### Without functions
+
+If you deploy `standalone/index.html` on its own (a drag-and-drop of the file),
+there is no function to call. The app detects this and falls back to calling
+Anthropic directly from the browser with a key you paste into Settings, which
+is kept in that browser's localStorage only.
 
 ## How the AI analysis works
 
-`app/api/analyze/route.ts` sends the (client-side downscaled) photo to the
-Claude API as a base64 image block with a nutrition-analyst system prompt.
+`app/api/analyze/route.ts` (Next.js) and `netlify/functions/analyze.mjs`
+(standalone) both send the client-side downscaled photo to the model with a
+nutrition-analyst system prompt. On Anthropic it goes as a base64 image block;
+on NVIDIA as an OpenAI-style `image_url` data URL.
 The response is constrained with **structured outputs**
 (`output_config.format` + JSON schema), so the API always returns valid JSON:
 

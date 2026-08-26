@@ -164,10 +164,15 @@
    Everything here is baked into the app, so you never re-enter it —
    even on a new phone, new browser, or after storage is cleared.
 
-   1) API_KEY — paste your Anthropic key (sk-ant-...) between the quotes
-      before deploying. ⚠️ Anyone you give your site URL to could then
-      use your key, so keep the URL to yourself. Leave "" to enter the
-      key in Settings instead.
+   The API key does NOT belong in this file. It lives in a Netlify
+   environment variable and is read by netlify/functions/analyze.mjs, so
+   it never reaches the browser and cannot be lifted from this page's
+   source. Set NVIDIA_API_KEY (or ANTHROPIC_API_KEY) under
+   Netlify → Site configuration → Environment variables.
+
+   1) API_KEY — leave "" unless you host this file somewhere with no
+      serverless functions. It is an Anthropic-only fallback, and
+      anything you put here is readable by every visitor.
 
    2) PROFILE — your stats. "Get started" uses these and jumps straight
       to Home. Adjust anytime in Settings → Redo onboarding.          */
@@ -191,6 +196,7 @@ const CONFIG = {
 
 /* ============================== state ============================== */
 const KEY = "caltracker:standalone:v1";
+const PROXY_URL = "/.netlify/functions/analyze";
 const MODELS = {
   "claude-haiku-4-5": { label: "Budget — Haiku 4.5", hint: "≈ $0.005 per scan · a few dollars lasts months" },
   "claude-sonnet-5": { label: "Balanced — Sonnet 5", hint: "≈ $0.01 per scan · sharper on mixed plates" },
@@ -202,7 +208,8 @@ const S = {
   profile: null,          // {sex, age, heightCm, weightKg, activity, mode}
   goals: null,            // {calories, protein_g, carbs_g, fat_g}
   logs: [],
-  apiKey: "",
+  apiKey: "",             // only used by the no-functions fallback
+  proxy: null,            // what the server function reports; null until probed
   model: null,            // resolved in load()
   tab: "home",            // home | analytics | plan | settings
   selectedDay: null,
@@ -251,6 +258,23 @@ function save() {
     try { data.logs = data.logs.map(({ photo, ...rest }) => rest); localStorage.setItem(KEY, JSON.stringify(data)); }
     catch (e2) { /* keep in memory only */ }
   }
+}
+/* The key lives on the server now, so ask the function what it is configured
+   with. A failure means this copy was deployed without functions (a bare
+   drag-and-drop of index.html), in which case we fall back to calling
+   Anthropic straight from the browser with a key from Settings. */
+async function probeProxy() {
+  try {
+    const res = await fetch(PROXY_URL);
+    S.proxy = res.ok ? await res.json() : { ok: false, reason: "unavailable" };
+  } catch (e) { S.proxy = { ok: false, reason: "unavailable" }; }
+  render();
+}
+function canScan() { return !!(S.proxy && S.proxy.ok) || !!S.apiKey; }
+function notReadyMessage() {
+  return S.proxy && S.proxy.ok === false && S.proxy.reason === "no_key"
+    ? "No API key on the server yet \u2014 set NVIDIA_API_KEY in Netlify \u2192 Site configuration \u2192 Environment variables."
+    : "Add your Anthropic API key in Settings first.";
 }
 window.addEventListener("storage", (e) => { if (e.key === KEY) { load(); render(); } });
 function rollover() {
@@ -403,20 +427,42 @@ function sanitize(raw) {
     notes: String(raw.notes ?? "").slice(0, 400),
   };
 }
-async function analyzeWithClaude({ imageB64, description, correction, previous }) {
-  if (!S.apiKey) throw new Error("Add your Anthropic API key in Settings first.");
-  const content = [];
-  if (imageB64) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageB64 } });
-  let instruction;
+function instructionFor({ imageB64, description, correction, previous }) {
   if (correction && previous) {
     const original = !imageB64 && description ? `The meal was originally described as: "${description.slice(0,1000)}"\n\n` : "";
-    instruction = `${original}Here is your previous analysis of this meal:\n${JSON.stringify(sanitize(previous))}\n\nThe user says the analysis needs fixing: "${correction.slice(0,500)}"\n\nRe-analyze applying the correction. Keep what was right; only change what the correction implies.`;
-  } else if (description && !imageB64) {
-    instruction = `Analyze this meal from the user's description (no photo):\n"${description.slice(0,1000)}"`;
-  } else {
-    instruction = "Analyze the food in this photo.";
+    return `${original}Here is your previous analysis of this meal:\n${JSON.stringify(sanitize(previous))}\n\nThe user says the analysis needs fixing: "${correction.slice(0,500)}"\n\nRe-analyze applying the correction. Keep what was right; only change what the correction implies.`;
   }
-  content.push({ type: "text", text: instruction });
+  if (description && !imageB64) {
+    return `Analyze this meal from the user's description (no photo):\n"${description.slice(0,1000)}"`;
+  }
+  return "Analyze the food in this photo.";
+}
+
+/* Proxy first so the key stays server-side; direct Anthropic only when this
+   copy was deployed without the function alongside it. */
+async function analyzeMeal(payload) {
+  if (S.proxy && S.proxy.ok) return sanitize(await analyzeViaProxy(payload));
+  if (!S.apiKey) throw new Error(notReadyMessage());
+  return sanitize(await analyzeDirectAnthropic(payload));
+}
+
+async function analyzeViaProxy({ imageB64, description, correction, previous }) {
+  const res = await fetch(PROXY_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ imageB64, description, correction,
+      previous: previous ? sanitize(previous) : undefined, model: S.model }),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.error) || "Analysis failed. Please try again.");
+  if (!data || !data.analysis) throw new Error("No analysis returned. Please try again.");
+  return data.analysis;
+}
+
+async function analyzeDirectAnthropic(payload) {
+  const content = [];
+  if (payload.imageB64) content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: payload.imageB64 } });
+  content.push({ type: "text", text: instructionFor(payload) });
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -440,9 +486,9 @@ async function analyzeWithClaude({ imageB64, description, correction, previous }
     try {
       const err = await res.json();
       const apiMsg = err?.error?.message || "";
-      if (res.status === 401) msg = "Invalid API key — check it in Settings.";
-      else if (res.status === 429) msg = "Rate limited — wait a moment and try again.";
-      else if (/credit balance/i.test(apiMsg)) msg = "Your API account is out of credits. Add a few dollars at platform.claude.com → Billing (on the Budget model that's months of scans).";
+      if (res.status === 401) msg = "Invalid API key \u2014 check it in Settings.";
+      else if (res.status === 429) msg = "Rate limited \u2014 wait a moment and try again.";
+      else if (/credit balance/i.test(apiMsg)) msg = "Your API account is out of credits. Add a few dollars at platform.claude.com \u2192 Billing (on the Budget model that's months of scans).";
       else if (apiMsg) msg = apiMsg.slice(0, 160);
     } catch (e) { /* keep generic */ }
     throw new Error(msg);
@@ -452,7 +498,7 @@ async function analyzeWithClaude({ imageB64, description, correction, previous }
   if (data.stop_reason === "max_tokens") throw new Error("Analysis ran too long. Please try again.");
   const text = (data.content || []).find((b) => b.type === "text");
   if (!text) throw new Error("No analysis returned. Please try again.");
-  return sanitize(JSON.parse(text.text));
+  return JSON.parse(text.text);
 }
 
 /* ============================== image utils ============================== */
@@ -478,14 +524,14 @@ function openScan() {
 function closeScan() { scanGen++; S.scan = null; render(); }
 async function onFilePicked(file) {
   if (!file || !S.scan) return;
-  if (!S.apiKey) { S.scan.error = "Add your Anthropic API key in Settings first."; S.scan.stage = "error"; render(); return; }
+  if (!canScan()) { S.scan.error = notReadyMessage(); S.scan.stage = "error"; render(); return; }
   const gen = ++scanGen;
   S.scan.stage = "analyzing"; S.scan.error = ""; render();
   try {
-    const [full, small] = await Promise.all([resizeToJpeg(file, 1024, 0.82), resizeToJpeg(file, 240, 0.7)]);
+    const [full, small] = await Promise.all([resizeToJpeg(file, (S.proxy && S.proxy.imageMaxEdge) || 1024, 0.82), resizeToJpeg(file, 240, 0.7)]);
     if (gen !== scanGen || !S.scan) return;
     S.scan.imageB64 = full.b64; S.scan.thumb = small.dataUrl; render();
-    const analysis = await analyzeWithClaude({ imageB64: full.b64 });
+    const analysis = await analyzeMeal({ imageB64: full.b64 });
     if (gen !== scanGen || !S.scan) return;
     finishAnalysis(analysis);
   } catch (e) {
@@ -496,11 +542,11 @@ async function onFilePicked(file) {
 async function onDescribe() {
   const text = S.scan?.description?.trim();
   if (!text) return;
-  if (!S.apiKey) { S.scan.error = "Add your Anthropic API key in Settings first."; S.scan.stage = "error"; render(); return; }
+  if (!canScan()) { S.scan.error = notReadyMessage(); S.scan.stage = "error"; render(); return; }
   const gen = ++scanGen;
   S.scan.stage = "analyzing"; S.scan.thumb = null; S.scan.imageB64 = null; render();
   try {
-    const analysis = await analyzeWithClaude({ description: text });
+    const analysis = await analyzeMeal({ description: text });
     if (gen !== scanGen || !S.scan) return;
     finishAnalysis(analysis);
   } catch (e) {
@@ -536,7 +582,7 @@ async function onFix() {
   const gen = scanGen;
   S.scan.fixing = true; S.scan.error = ""; render();
   try {
-    const updated = await analyzeWithClaude({
+    const updated = await analyzeMeal({
       imageB64: S.scan.imageB64 || undefined,
       description: S.scan.imageB64 ? undefined : (S.scan.description.trim() || S.scan.analysis.food_name),
       correction: text, previous: S.scan.analysis,
@@ -964,15 +1010,20 @@ function viewSettings() {
   return `
     <header><h1>Settings</h1></header>
     <section class="card" style="padding:20px;margin-top:18px">
-      <h2 style="font-size:14px">Anthropic API key</h2>
-      <p class="muted" style="margin-top:4px">Powers the photo analysis. Stored only in this browser — get one at <b>platform.claude.com</b>.</p>
-      <input id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(S.apiKey)}" style="margin-top:12px" autocomplete="off"/>
-      <button class="btn" style="margin-top:10px;padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
-      <p class="muted" style="margin-top:8px">${
-        S.apiKey && CONFIG.API_KEY && S.apiKey === CONFIG.API_KEY ? "✓ Using the key built into the app — nothing to re-enter, ever."
-        : S.apiKey ? "✓ Key saved in this browser — scanning is enabled."
-        : "⚠️ No key yet — scanning won't work until you add one. Tip: paste it into the CONFIG block at the top of index.html to make it permanent on every device."}</p>
+      <h2 style="font-size:14px">AI service</h2>
+      ${S.proxy && S.proxy.ok ? `
+        <p class="muted" style="margin-top:4px">Analysis runs through this site's own server function, so the API key stays on the server and is never sent to your browser.</p>
+        <p style="margin-top:12px;font-size:15px;font-weight:700;text-transform:capitalize">${esc(S.proxy.provider)}${S.proxy.model ? `<span class="muted" style="font-weight:400;text-transform:none"> · ${esc(S.proxy.model)}</span>` : ""}</p>
+        <p class="muted" style="margin-top:8px">✓ Ready. To change the key, edit it in Netlify → Site configuration → Environment variables — no redeploy needed.</p>`
+      : `
+        <p class="muted" style="margin-top:4px">${S.proxy && S.proxy.reason === "no_key"
+          ? "The server function is live but has no key yet. Add <b>NVIDIA_API_KEY</b> in Netlify → Site configuration → Environment variables."
+          : "No server function found here, so this copy calls Anthropic directly from your browser. Paste a key below — it is stored only in this browser."}</p>
+        <input id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(S.apiKey)}" style="margin-top:12px" autocomplete="off"/>
+        <button class="btn" style="margin-top:10px;padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
+        <p class="muted" style="margin-top:8px">${S.apiKey ? "✓ Key saved in this browser — scanning is enabled." : "⚠️ No key yet — scanning won't work until you add one."}</p>`}
     </section>
+    ${showModelPicker() ? `
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">AI model</h2>
       <p class="muted" style="margin-top:4px">All three are accurate for everyday logging — pick by cost. Charged to your API credits per scan.</p>
@@ -983,7 +1034,7 @@ function viewSettings() {
             ${S.model === id ? "<span>✓</span>" : ""}
           </button>`).join("")}
       </div>
-    </section>
+    </section>` : ""}
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">Your details</h2>
       <dl style="margin-top:12px;font-size:14px">
@@ -999,14 +1050,19 @@ function viewSettings() {
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">About</h2>
-      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with Claude's vision AI (${esc(S.model)}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
+      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with vision AI (${esc(S.proxy && S.proxy.ok ? (S.proxy.model || S.proxy.provider) : S.model)}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px;text-align:center">
       <button onclick="wipeAll()" style="border:0;background:none;font:inherit;font-size:14px;font-weight:700;color:var(--danger);cursor:pointer;padding:6px 12px">
         ${S.confirmWipe ? "Tap again to delete everything" : "Delete all data"}</button>
     </section>`;
 }
-function saveKey() { S.apiKey = document.getElementById("apiKey").value.trim(); save(); render(); }
+function showModelPicker() { return !(S.proxy && S.proxy.ok) || !!S.proxy.modelPicker; }
+function saveKey() {
+  const el = document.getElementById("apiKey");
+  if (!el) return;
+  S.apiKey = el.value.trim(); save(); render();
+}
 function setModel(id) { if (MODELS[id]) { S.model = id; save(); render(); } }
 function updateWeight() {
   const w = +document.getElementById("w2").value;
@@ -1059,7 +1115,7 @@ function viewScan() {
           <button class="scan-card" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:16px;font-size:14px;font-weight:600" onclick="S.scan.describeMode=true;render()">
             ${I.lines} Describe your food
           </button>
-          ${!S.apiKey ? `<p class="err" style="text-align:center">No API key yet — add it in Settings first.</p>` : ""}
+          ${!canScan() ? `<p class="err" style="text-align:center">${esc(notReadyMessage())}</p>` : ""}
         </div>`;
   } else if (sc.stage === "analyzing") {
     body = `<div class="center-col" style="align-items:center;text-align:center">
@@ -1155,6 +1211,7 @@ document.getElementById("galleryInput").addEventListener("change", (e) => { onFi
 /* boot */
 load();
 render();
+probeProxy();
 </script>
 </body>
 </html>
