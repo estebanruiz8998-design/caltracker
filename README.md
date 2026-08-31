@@ -60,6 +60,26 @@ Baking a key into the HTML would publish it to every visitor.
 Rotating the key later is a one-field edit in Netlify — no code change, no
 redeploy of the HTML.
 
+### Two ways to supply the key
+
+| | Where the key lives | Who can use it |
+|---|---|---|
+| **Environment variable** (recommended) | Netlify, server-side | everyone visiting the site |
+| **Settings screen** | that browser's localStorage | just that browser |
+
+The environment variable always wins: once it is set, the app stops asking for
+a key and callers cannot override it or the model it uses.
+
+Without it, the app takes a key in **Settings → API key**. Keys identify their
+own provider — `nvapi-…` routes to NVIDIA, `sk-ant-…` to Anthropic — so pasting
+one is all the configuration needed. **Test key** checks it against the provider
+and lists the vision models it can reach, which then populate the model picker.
+
+An NVIDIA key still travels through the function on each scan, because browsers
+are blocked from calling NVIDIA directly (no CORS). Without the function
+deployed, only Anthropic keys work, and the app says so rather than failing at
+scan time.
+
 ### Choosing an NVIDIA model
 
 The default is a guess at what your account can reach. To see the real list,

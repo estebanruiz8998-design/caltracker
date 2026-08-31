@@ -170,9 +170,10 @@
    source. Set NVIDIA_API_KEY (or ANTHROPIC_API_KEY) under
    Netlify → Site configuration → Environment variables.
 
-   1) API_KEY — leave "" unless you host this file somewhere with no
-      serverless functions. It is an Anthropic-only fallback, and
-      anything you put here is readable by every visitor.
+   1) API_KEY — leave "" normally. It only pre-fills the key box in
+      Settings, and anything you put here is readable by every visitor.
+      Without the function deployed it must be an Anthropic key, since
+      browsers cannot call NVIDIA directly.
 
    2) PROFILE — your stats. "Get started" uses these and jumps straight
       to Home. Adjust anytime in Settings → Redo onboarding.          */
@@ -202,15 +203,31 @@ const MODELS = {
   "claude-sonnet-5": { label: "Balanced — Sonnet 5", hint: "≈ $0.01 per scan · sharper on mixed plates" },
   "claude-opus-4-8": { label: "Best — Opus 4.8", hint: "≈ $0.03 per scan · most accurate portions" },
 };
+/* Fallback shortlist, replaced by the real list once a key is verified. */
+const NVIDIA_MODELS = {
+  "meta/llama-4-maverick-17b-128e-instruct": { label: "Llama 4 Maverick", hint: "Tightest instruction-following — most reliable JSON" },
+  "qwen/qwen2.5-vl-72b-instruct": { label: "Qwen2.5-VL 72B", hint: "Sharpest on portion sizes from visual detail" },
+  "meta/llama-3.2-90b-vision-instruct": { label: "Llama 3.2 90B Vision", hint: "Safe default — widely available" },
+};
 const DEFAULT_MODEL = MODELS[CONFIG.MODEL] ? CONFIG.MODEL : "claude-haiku-4-5";
+const DEFAULT_NV_MODEL = Object.keys(NVIDIA_MODELS)[0];
+
+/* A key announces its own provider, so pasting one is all the routing needed. */
+function keyProvider(k) {
+  if (/^nvapi-/i.test(k || "")) return "nvidia";
+  if (/^sk-ant-/i.test(k || "")) return "anthropic";
+  return null;
+}
 
 const S = {
   profile: null,          // {sex, age, heightCm, weightKg, activity, mode}
   goals: null,            // {calories, protein_g, carbs_g, fat_g}
   logs: [],
-  apiKey: "",             // only used by the no-functions fallback
+  apiKey: "",             // the key pasted in Settings, when the server has none
   proxy: null,            // what the server function reports; null until probed
+  keyCheck: null,         // {state:"testing"|"ok"|"bad", message, models[]}
   model: null,            // resolved in load()
+  nvModel: null,          // NVIDIA model id, resolved in load()
   tab: "home",            // home | analytics | plan | settings
   selectedDay: null,
   scan: null,
@@ -246,35 +263,62 @@ function load() {
     S.logs = Array.isArray(raw.logs) ? raw.logs : [];
     S.apiKey = raw.apiKey || "";
     S.model = MODELS[raw.model] ? raw.model : null;
+    S.nvModel = typeof raw.nvModel === "string" && raw.nvModel ? raw.nvModel : null;
   } catch (e) { /* corrupted storage — start fresh */ }
   // Baked-in fallbacks: used whenever nothing has been saved in this browser.
   if (!S.apiKey && CONFIG.API_KEY) S.apiKey = CONFIG.API_KEY;
   if (!S.model) S.model = DEFAULT_MODEL;
+  if (!S.nvModel) S.nvModel = DEFAULT_NV_MODEL;
 }
 function save() {
-  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey, model: S.model };
+  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey, model: S.model, nvModel: S.nvModel };
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch (e) {
     try { data.logs = data.logs.map(({ photo, ...rest }) => rest); localStorage.setItem(KEY, JSON.stringify(data)); }
     catch (e2) { /* keep in memory only */ }
   }
 }
-/* The key lives on the server now, so ask the function what it is configured
-   with. A failure means this copy was deployed without functions (a bare
-   drag-and-drop of index.html), in which case we fall back to calling
-   Anthropic straight from the browser with a key from Settings. */
+/* Ask the function whether it exists and whether it already holds a key.
+   A failure means this copy was deployed without functions (a bare
+   drag-and-drop of index.html), which limits it to Anthropic. */
 async function probeProxy() {
   try {
     const res = await fetch(PROXY_URL);
-    S.proxy = res.ok ? await res.json() : { ok: false, reason: "unavailable" };
-  } catch (e) { S.proxy = { ok: false, reason: "unavailable" }; }
+    S.proxy = res.ok ? await res.json() : { ok: false };
+  } catch (e) { S.proxy = { ok: false }; }
   render();
 }
-function canScan() { return !!(S.proxy && S.proxy.ok) || !!S.apiKey; }
+function hasProxy() { return !!(S.proxy && S.proxy.ok); }
+function serverKeyed() { return hasProxy() && !!S.proxy.serverKey; }
+/* Which provider is actually driving analysis right now. */
+function activeProvider() {
+  return serverKeyed() ? S.proxy.provider : keyProvider(S.apiKey);
+}
+function activeModel() {
+  return activeProvider() === "nvidia" ? S.nvModel : S.model;
+}
+/* NVIDIA caps inline image payloads well below Anthropic's limit. */
+function imageMaxEdge() {
+  if (serverKeyed()) return S.proxy.imageMaxEdge || 1024;
+  return activeProvider() === "nvidia" ? 768 : 1024;
+}
+/* Browsers cannot call NVIDIA directly (no CORS), so an nvapi- key is only
+   usable when the site's function is there to relay it. */
+function canScan() {
+  if (serverKeyed()) return true;
+  if (!S.apiKey) return false;
+  const p = keyProvider(S.apiKey);
+  if (!p) return false;
+  return p === "anthropic" || hasProxy();
+}
 function notReadyMessage() {
-  return S.proxy && S.proxy.ok === false && S.proxy.reason === "no_key"
-    ? "No API key on the server yet \u2014 set NVIDIA_API_KEY in Netlify \u2192 Site configuration \u2192 Environment variables."
-    : "Add your Anthropic API key in Settings first.";
+  if (!S.apiKey) return "Add an API key in Settings first.";
+  const p = keyProvider(S.apiKey);
+  if (!p) return "That key isn't recognized \u2014 NVIDIA keys start with \u201cnvapi-\u201d, Anthropic keys with \u201csk-ant-\u201d.";
+  if (p === "nvidia" && !hasProxy()) {
+    return "An NVIDIA key needs this site's server function \u2014 browsers can't call NVIDIA directly. Deploy the repo to Netlify (netlify.toml is set up), or use an Anthropic key here instead.";
+  }
+  return "Add an API key in Settings first.";
 }
 window.addEventListener("storage", (e) => { if (e.key === KEY) { load(); render(); } });
 function rollover() {
@@ -438,11 +482,12 @@ function instructionFor({ imageB64, description, correction, previous }) {
   return "Analyze the food in this photo.";
 }
 
-/* Proxy first so the key stays server-side; direct Anthropic only when this
-   copy was deployed without the function alongside it. */
+/* Route through the function whenever there is one: it holds the server key if
+   configured, and it is the only way an NVIDIA key can be used at all. Direct
+   Anthropic is reserved for copies deployed without the function. */
 async function analyzeMeal(payload) {
-  if (S.proxy && S.proxy.ok) return sanitize(await analyzeViaProxy(payload));
-  if (!S.apiKey) throw new Error(notReadyMessage());
+  if (!canScan()) throw new Error(notReadyMessage());
+  if (hasProxy()) return sanitize(await analyzeViaProxy(payload));
   return sanitize(await analyzeDirectAnthropic(payload));
 }
 
@@ -451,7 +496,10 @@ async function analyzeViaProxy({ imageB64, description, correction, previous }) 
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ imageB64, description, correction,
-      previous: previous ? sanitize(previous) : undefined, model: S.model }),
+      previous: previous ? sanitize(previous) : undefined,
+      model: activeModel(),
+      /* Only sent when the server has no key of its own; it ignores it otherwise. */
+      apiKey: serverKeyed() ? undefined : S.apiKey }),
   });
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error((data && data.error) || "Analysis failed. Please try again.");
@@ -528,7 +576,7 @@ async function onFilePicked(file) {
   const gen = ++scanGen;
   S.scan.stage = "analyzing"; S.scan.error = ""; render();
   try {
-    const [full, small] = await Promise.all([resizeToJpeg(file, (S.proxy && S.proxy.imageMaxEdge) || 1024, 0.82), resizeToJpeg(file, 240, 0.7)]);
+    const [full, small] = await Promise.all([resizeToJpeg(file, imageMaxEdge(), 0.82), resizeToJpeg(file, 240, 0.7)]);
     if (gen !== scanGen || !S.scan) return;
     S.scan.imageB64 = full.b64; S.scan.thumb = small.dataUrl; render();
     const analysis = await analyzeMeal({ imageB64: full.b64 });
@@ -1010,30 +1058,48 @@ function viewSettings() {
   return `
     <header><h1>Settings</h1></header>
     <section class="card" style="padding:20px;margin-top:18px">
-      <h2 style="font-size:14px">AI service</h2>
-      ${S.proxy && S.proxy.ok ? `
-        <p class="muted" style="margin-top:4px">Analysis runs through this site's own server function, so the API key stays on the server and is never sent to your browser.</p>
-        <p style="margin-top:12px;font-size:15px;font-weight:700;text-transform:capitalize">${esc(S.proxy.provider)}${S.proxy.model ? `<span class="muted" style="font-weight:400;text-transform:none"> · ${esc(S.proxy.model)}</span>` : ""}</p>
-        <p class="muted" style="margin-top:8px">✓ Ready. To change the key, edit it in Netlify → Site configuration → Environment variables — no redeploy needed.</p>`
+      <h2 style="font-size:14px">API key</h2>
+      ${serverKeyed() ? `
+        <p class="muted" style="margin-top:4px">This site's server function holds the key, so it never reaches your browser and nothing needs entering here.</p>
+        <div style="margin-top:12px">${keyBadgeHtml(S.proxy.provider, "server")}</div>
+        ${S.proxy.model ? `<p class="muted" style="margin-top:6px">Model: <b style="color:var(--ink)">${esc(S.proxy.model)}</b></p>` : ""}
+        <p class="muted" style="margin-top:8px">✓ Ready. Change the key in Netlify → Site configuration → Environment variables — no redeploy needed.</p>`
       : `
-        <p class="muted" style="margin-top:4px">${S.proxy && S.proxy.reason === "no_key"
-          ? "The server function is live but has no key yet. Add <b>NVIDIA_API_KEY</b> in Netlify → Site configuration → Environment variables."
-          : "No server function found here, so this copy calls Anthropic directly from your browser. Paste a key below — it is stored only in this browser."}</p>
-        <input id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(S.apiKey)}" style="margin-top:12px" autocomplete="off"/>
-        <button class="btn" style="margin-top:10px;padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
-        <p class="muted" style="margin-top:8px">${S.apiKey ? "✓ Key saved in this browser — scanning is enabled." : "⚠️ No key yet — scanning won't work until you add one."}</p>`}
+        <p class="muted" style="margin-top:4px">Paste an <b>NVIDIA</b> key (<code>nvapi-…</code>) from <b>build.nvidia.com</b>, or an <b>Anthropic</b> key (<code>sk-ant-…</code>). Stored only in this browser.</p>
+        <input id="apiKey" type="password" placeholder="nvapi-…" value="${esc(S.apiKey)}" style="margin-top:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" autocomplete="off" spellcheck="false" oninput="onKeyInput()"/>
+        <div id="keyBadge" style="margin-top:10px;font-size:13px">${keyBadgeHtml(keyProvider(S.apiKey), S.apiKey)}</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn ghost" style="padding:12px" onclick="testKey()" ${S.keyCheck && S.keyCheck.state === "testing" ? "disabled" : ""}>${S.keyCheck && S.keyCheck.state === "testing" ? "Testing…" : "Test key"}</button>
+          <button class="btn" style="padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
+        </div>
+        ${keyCheckHtml()}
+        ${keyProvider(S.apiKey) === "nvidia" && !hasProxy() ? `
+          <p class="err" style="margin-top:10px">NVIDIA keys can't be used from a plain static file — browsers are blocked from calling NVIDIA directly. Deploy this repo to Netlify so the server function can relay it.</p>` : ""}`}
     </section>
     ${showModelPicker() ? `
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">AI model</h2>
-      <p class="muted" style="margin-top:4px">All three are accurate for everyday logging — pick by cost. Charged to your API credits per scan.</p>
-      <div style="margin-top:12px">
-        ${Object.entries(MODELS).map(([id, m]) => `
-          <button class="opt ${S.model === id ? "on" : ""}" style="margin-bottom:8px" onclick="setModel('${id}')">
-            <span><span class="t">${m.label}</span><span class="h">${m.hint}</span></span>
-            ${S.model === id ? "<span>✓</span>" : ""}
-          </button>`).join("")}
-      </div>
+      ${activeProvider() === "nvidia" ? `
+        <p class="muted" style="margin-top:4px">Must be vision-capable. ${S.keyCheck && S.keyCheck.state === "ok" && S.keyCheck.provider === "nvidia"
+          ? `Showing the ${S.keyCheck.models.length} your key can reach.`
+          : "Test your key above to list the ones your key can actually reach."}</p>
+        <div style="margin-top:12px;max-height:280px;overflow-y:auto">
+          ${nvModelOptions().map((id) => `
+            <button class="opt ${S.nvModel === id ? "on" : ""}" style="margin-bottom:8px" onclick="setNvModel('${esc(id)}')">
+              <span><span class="t">${esc(NVIDIA_MODELS[id] ? NVIDIA_MODELS[id].label : id)}</span><span class="h">${esc(NVIDIA_MODELS[id] ? NVIDIA_MODELS[id].hint : id)}</span></span>
+              ${S.nvModel === id ? "<span>✓</span>" : ""}
+            </button>`).join("")}
+        </div>
+        ${nvModelOptions().includes(S.nvModel) ? "" : `<p class="muted" style="margin-top:4px">Currently using <b style="color:var(--ink)">${esc(S.nvModel)}</b>.</p>`}`
+      : `
+        <p class="muted" style="margin-top:4px">All three are accurate for everyday logging — pick by cost. Charged to your API credits per scan.</p>
+        <div style="margin-top:12px">
+          ${Object.entries(MODELS).map(([id, m]) => `
+            <button class="opt ${S.model === id ? "on" : ""}" style="margin-bottom:8px" onclick="setModel('${id}')">
+              <span><span class="t">${m.label}</span><span class="h">${m.hint}</span></span>
+              ${S.model === id ? "<span>✓</span>" : ""}
+            </button>`).join("")}
+        </div>`}
     </section>` : ""}
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">Your details</h2>
@@ -1050,20 +1116,94 @@ function viewSettings() {
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">About</h2>
-      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with vision AI (${esc(S.proxy && S.proxy.ok ? (S.proxy.model || S.proxy.provider) : S.model)}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
+      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with vision AI (${esc(activeModel() || "no key yet")}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px;text-align:center">
       <button onclick="wipeAll()" style="border:0;background:none;font:inherit;font-size:14px;font-weight:700;color:var(--danger);cursor:pointer;padding:6px 12px">
         ${S.confirmWipe ? "Tap again to delete everything" : "Delete all data"}</button>
     </section>`;
 }
-function showModelPicker() { return !(S.proxy && S.proxy.ok) || !!S.proxy.modelPicker; }
+function showModelPicker() {
+  if (serverKeyed()) return S.proxy.modelPicker !== false;
+  return !!activeProvider();
+}
+
+/* NVIDIA green / Anthropic clay, so the key you paste identifies itself. */
+const PROVIDER_STYLE = {
+  nvidia: { name: "NVIDIA", color: "#76b900", note: "relayed by this site's function" },
+  anthropic: { name: "Anthropic", color: "#d97757", note: "Claude vision" },
+};
+function keyBadgeHtml(p, raw) {
+  if (!raw) return `<span class="muted">Paste a key to begin</span>`;
+  if (!p) return `<span style="color:var(--danger);font-weight:700">Unrecognized format</span><span class="muted"> — expected nvapi-… or sk-ant-…</span>`;
+  const st = PROVIDER_STYLE[p];
+  return `<span style="display:inline-flex;align-items:center;gap:7px;font-weight:700;color:${st.color}">`
+    + `<span style="width:9px;height:9px;border-radius:50%;background:${st.color}"></span>${st.name}</span>`
+    + `<span class="muted"> · ${st.note}</span>`;
+}
+/* Repaint the badge in place — a full render would steal focus mid-typing. */
+function onKeyInput() {
+  const el = document.getElementById("apiKey"), badge = document.getElementById("keyBadge");
+  if (!el || !badge) return;
+  const raw = el.value.trim();
+  badge.innerHTML = keyBadgeHtml(keyProvider(raw), raw);
+}
+function keyCheckHtml() {
+  const c = S.keyCheck;
+  if (!c || c.state === "testing") return "";
+  if (c.state === "bad") return `<p class="err" style="margin-top:10px">✗ ${esc(c.message)}</p>`;
+  return `<p style="margin-top:10px;font-size:13px;color:#0a5c0a;font-weight:600">✓ Key works — ${esc(String(c.provider))} accepted it`
+    + `${c.total ? ` and lists ${c.total} models` : ""}.</p>`;
+}
+/* Asks the function to check the key against its provider, which is the only
+   way to test an NVIDIA key from a browser. */
+async function testKey() {
+  const el = document.getElementById("apiKey");
+  const raw = (el ? el.value : S.apiKey).trim();
+  if (!raw) { S.keyCheck = { state: "bad", message: "Paste a key first." }; render(); return; }
+  if (!keyProvider(raw)) {
+    S.keyCheck = { state: "bad", message: 'Unrecognized key format — NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".' };
+    render(); return;
+  }
+  if (!hasProxy()) {
+    S.keyCheck = { state: "bad", message: "Testing needs this site's server function, which isn't deployed here." };
+    render(); return;
+  }
+  S.keyCheck = { state: "testing" }; render();
+  try {
+    const res = await fetch(PROXY_URL, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "verify", apiKey: raw }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.ok) {
+      S.keyCheck = { state: "bad", message: (data && data.error) || `Check failed (HTTP ${res.status}).` };
+    } else {
+      const models = Array.isArray(data.models) ? data.models : [];
+      S.keyCheck = { state: "ok", provider: data.provider, models, total: data.total };
+      S.apiKey = raw;                                     // a key that works is worth keeping
+      if (data.provider === "nvidia" && models.length && !models.includes(S.nvModel)) S.nvModel = models[0];
+      save();
+    }
+  } catch (e) {
+    S.keyCheck = { state: "bad", message: "Couldn't reach the server function." };
+  }
+  render();
+}
+function nvModelOptions() {
+  const c = S.keyCheck;
+  if (c && c.state === "ok" && c.provider === "nvidia" && c.models.length) return c.models;
+  return Object.keys(NVIDIA_MODELS);
+}
 function saveKey() {
   const el = document.getElementById("apiKey");
   if (!el) return;
-  S.apiKey = el.value.trim(); save(); render();
+  S.apiKey = el.value.trim();
+  S.keyCheck = null;                                      // a new key invalidates the last check
+  save(); render();
 }
 function setModel(id) { if (MODELS[id]) { S.model = id; save(); render(); } }
+function setNvModel(id) { if (id) { S.nvModel = id; save(); render(); } }
 function updateWeight() {
   const w = +document.getElementById("w2").value;
   if (!(w >= 25 && w <= 350)) return;
@@ -1082,7 +1222,8 @@ function redoSetup() {
 function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
-  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "", model: DEFAULT_MODEL, confirmWipe: false });
+  Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "",
+    model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
   OB.step = 0; OB.manual = false;
   render();
 }

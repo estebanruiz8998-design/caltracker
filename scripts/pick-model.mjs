@@ -18,7 +18,7 @@
  * a model that passes here is a model the app will work with.
  */
 import fs from "fs";
-import { SCHEMA, SYSTEM_PROMPT, JSON_RULES, extractJson, NVIDIA_BASE } from "../netlify/functions/analyze.mjs";
+import { SCHEMA, SYSTEM_PROMPT, JSON_RULES, extractJson, NVIDIA_BASE, LOOKS_VISUAL } from "../netlify/functions/analyze.mjs";
 
 const KEY = process.env.NVIDIA_API_KEY;
 if (!KEY) { console.error("Set NVIDIA_API_KEY first."); process.exit(1); }
@@ -62,7 +62,6 @@ const PREFERRED = [
   "meta/llama-3.2-11b-vision-instruct",
   "microsoft/phi-3.5-vision-instruct",
 ];
-const LOOKS_VISUAL = /(^|[-\/])(vl|vlm|vision|multimodal)([-\/]|$)|llama-4|gemma-3|maverick|scout|phi-3\.5-vision|mistral-medium/i;
 
 async function listModels() {
   const res = await fetch(`${NVIDIA_BASE}/models`, { headers: { authorization: `Bearer ${KEY}` } });

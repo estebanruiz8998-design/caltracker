@@ -19,7 +19,17 @@
 export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-90b-vision-instruct";
-const ANTHROPIC_MODELS = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"];
+export const ANTHROPIC_MODELS = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"];
+
+/* Model ids that look image-capable, used to shortlist NVIDIA_MODEL candidates. */
+export const LOOKS_VISUAL = /(^|[-\/])(vl|vlm|vision|multimodal)([-\/]|$)|llama-4|gemma-3|maverick|scout|phi-3\.5-vision|mistral-medium/i;
+
+/* Keys identify their own provider, so a pasted key routes itself. */
+export function detectProvider(key) {
+  if (/^nvapi-/i.test(key || "")) return "nvidia";
+  if (/^sk-ant-/i.test(key || "")) return "anthropic";
+  return null;
+}
 
 /* Requests larger than this are rejected before they reach the provider, so a
    stray caller can't run up the bill on a function that has no auth of its own. */
@@ -60,7 +70,7 @@ export const JSON_RULES = `\n\nRespond with a single JSON object and nothing els
 It must match this JSON Schema exactly:
 ${JSON.stringify(SCHEMA)}`;
 
-function provider() {
+function serverProvider() {
   const forced = (process.env.AI_PROVIDER || "").trim().toLowerCase();
   if (forced === "nvidia" || forced === "anthropic") return forced;
   if (process.env.NVIDIA_API_KEY) return "nvidia";
@@ -123,7 +133,13 @@ export function extractJson(text) {
 }
 
 async function callNvidia(key, payload) {
-  const model = (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL).trim();
+  /* Only a caller spending their own key may choose the model. On the server's
+     key the server decides, so a caller can't aim it at a pricier model. */
+  const requested = typeof payload.model === "string" && /^[\w.\-]+\/[\w.\-]+$/.test(payload.model.trim())
+    ? payload.model.trim() : "";
+  const model = payload.usingClientKey
+    ? (requested || process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL)
+    : (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL);
   const instruction = instructionFor(payload) + JSON_RULES;
 
   /* Text-only requests use a plain string so models without vision still work. */
@@ -222,6 +238,32 @@ async function callAnthropic(key, payload) {
   return json({ analysis: parsed, provider: "anthropic", model });
 }
 
+/* Checks a key against its provider and reports the models it can reach.
+   This is what the app's "Test key" button calls. */
+async function verifyKey(key) {
+  const name = detectProvider(key);
+  if (!name) {
+    return fail('Unrecognized key format. NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".', 400);
+  }
+  if (name === "nvidia") {
+    const res = await fetch(`${NVIDIA_BASE}/models`, { headers: { authorization: `Bearer ${key}` } });
+    if (res.status === 401 || res.status === 403) return fail("NVIDIA rejected this key. Regenerate it at build.nvidia.com.", 401);
+    if (!res.ok) return fail(`NVIDIA returned HTTP ${res.status}.`, 502);
+    const ids = ((await res.json())?.data || []).map((m) => m.id).filter(Boolean);
+    const vision = ids.filter((id) => LOOKS_VISUAL.test(id)).sort();
+    return json({ ok: true, provider: "nvidia", total: ids.length,
+      models: vision.length ? vision : ids.sort().slice(0, 40), visionOnly: vision.length > 0 });
+  }
+  const res = await fetch("https://api.anthropic.com/v1/models", {
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+  });
+  if (res.status === 401) return fail("Anthropic rejected this key. Check it at platform.claude.com.", 401);
+  if (!res.ok) return fail(`Anthropic returned HTTP ${res.status}.`, 502);
+  const ids = ((await res.json())?.data || []).map((m) => m.id).filter(Boolean);
+  return json({ ok: true, provider: "anthropic", total: ids.length,
+    models: ANTHROPIC_MODELS.filter((m) => ids.includes(m)), visionOnly: true });
+}
+
 /* GET ?models=1 — lists the model ids this NVIDIA key can reach, so a wrong
    NVIDIA_MODEL is diagnosable from the browser instead of by guesswork. */
 async function listNvidiaModels(key) {
@@ -236,36 +278,57 @@ async function listNvidiaModels(key) {
 }
 
 export default async function handler(req) {
-  const name = provider();
-  const key = apiKeyFor(name);
+  const envName = serverProvider();
+  const envKey = apiKeyFor(envName);
+  const hasServerKey = envName !== "none";
 
   if (req.method === "GET") {
-    if (name === "none") {
-      return json({ ok: false, reason: "no_key", provider: null,
-        hint: "Set NVIDIA_API_KEY (or ANTHROPIC_API_KEY) in Netlify → Site configuration → Environment variables." });
-    }
-    if (new URL(req.url).searchParams.get("models") && name === "nvidia") {
-      return listNvidiaModels(key);
+    if (new URL(req.url).searchParams.get("models") && envName === "nvidia") {
+      return listNvidiaModels(envKey);
     }
     return json({
       ok: true,
-      provider: name,
-      model: name === "nvidia" ? (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL) : null,
+      /* The function is reachable either way; serverKey says whether the
+         caller still needs to supply a key of their own. */
+      serverKey: hasServerKey,
+      provider: hasServerKey ? envName : null,
+      model: envName === "nvidia" ? (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL) : null,
       /* NVIDIA caps inline image payloads well below Anthropic's limit. */
-      imageMaxEdge: name === "nvidia" ? 768 : 1024,
-      modelPicker: name === "anthropic",
+      imageMaxEdge: envName === "nvidia" ? 768 : 1024,
+      modelPicker: envName !== "nvidia",
+      hint: hasServerKey ? undefined
+        : "No key on the server. Paste one in Settings, or set NVIDIA_API_KEY in Netlify → Site configuration → Environment variables.",
     });
   }
 
   if (req.method !== "POST") return fail("Method not allowed.", 405);
-  if (name === "none") return fail("No API key configured on the server.", 503);
 
   const raw = await req.text();
   if (raw.length > MAX_BODY_BYTES) return fail("Request too large.", 413);
 
   let payload;
   try { payload = JSON.parse(raw); } catch { return fail("Malformed request body.", 400); }
+
+  const clientKey = typeof payload?.apiKey === "string" ? payload.apiKey.trim() : "";
+
+  if (payload?.action === "verify") {
+    if (!clientKey) return fail("No key to verify.", 400);
+    try { return await verifyKey(clientKey); }
+    catch (e) { return fail("Could not reach the provider to check the key.", 502, String(e?.message || e).slice(0, 200)); }
+  }
+
   if (!payload?.imageB64 && !payload?.description) return fail("Nothing to analyze.", 400);
+
+  /* A key configured on the server always wins, so a deployed site keeps using
+     its own credentials no matter what a caller sends. */
+  let name = envName, key = envKey;
+  if (!hasServerKey) {
+    if (!clientKey) return fail("No API key yet — add one in Settings.", 503);
+    name = detectProvider(clientKey);
+    if (!name) return fail('Unrecognized key format. NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".', 400);
+    key = clientKey;
+  }
+  payload.usingClientKey = !hasServerKey;
 
   try {
     return name === "nvidia" ? await callNvidia(key, payload) : await callAnthropic(key, payload);
