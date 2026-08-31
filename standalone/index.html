@@ -224,6 +224,7 @@ const S = {
   goals: null,            // {calories, protein_g, carbs_g, fat_g}
   logs: [],
   apiKey: "",             // the saved key, used when the server has none
+  overrideKey: false,     // prefer the saved key even when the server has one
   keyDraft: null,         // what's typed in the key box; survives a failed test
   proxy: null,            // what the server function reports; null until probed
   keyCheck: null,         // {state:"testing"|"ok"|"bad", message, models[]}
@@ -265,6 +266,7 @@ function load() {
     S.apiKey = raw.apiKey || "";
     S.model = MODELS[raw.model] ? raw.model : null;
     S.nvModel = typeof raw.nvModel === "string" && raw.nvModel ? raw.nvModel : null;
+    S.overrideKey = !!raw.overrideKey;
   } catch (e) { /* corrupted storage — start fresh */ }
   // Baked-in fallbacks: used whenever nothing has been saved in this browser.
   if (!S.apiKey && CONFIG.API_KEY) S.apiKey = CONFIG.API_KEY;
@@ -272,7 +274,8 @@ function load() {
   if (!S.nvModel) S.nvModel = DEFAULT_NV_MODEL;
 }
 function save() {
-  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey, model: S.model, nvModel: S.nvModel };
+  const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey,
+    overrideKey: S.overrideKey, model: S.model, nvModel: S.nvModel };
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch (e) {
     try { data.logs = data.logs.map(({ photo, ...rest }) => rest); localStorage.setItem(KEY, JSON.stringify(data)); }
@@ -291,26 +294,30 @@ async function probeProxy() {
 }
 function hasProxy() { return !!(S.proxy && S.proxy.ok); }
 function serverKeyed() { return hasProxy() && !!S.proxy.serverKey; }
+/* A site configured with one provider shouldn't trap you there: saving your own
+   key overrides the server's, and you spend your own quota when you do. */
+function usingOwnKey() { return !!S.apiKey && (!serverKeyed() || !!S.overrideKey); }
 /* Which provider is actually driving analysis right now. */
 function activeProvider() {
-  return serverKeyed() ? S.proxy.provider : keyProvider(S.apiKey);
+  if (usingOwnKey()) return keyProvider(S.apiKey);
+  return serverKeyed() ? S.proxy.provider : null;
 }
 function activeModel() {
   return activeProvider() === "nvidia" ? S.nvModel : S.model;
 }
 /* NVIDIA caps inline image payloads well below Anthropic's limit. */
 function imageMaxEdge() {
-  if (serverKeyed()) return S.proxy.imageMaxEdge || 1024;
-  return activeProvider() === "nvidia" ? 768 : 1024;
+  if (activeProvider() === "nvidia") return 768;
+  return serverKeyed() && !usingOwnKey() ? (S.proxy.imageMaxEdge || 1024) : 1024;
 }
 /* Browsers cannot call NVIDIA directly (no CORS), so an nvapi- key is only
    usable when the site's function is there to relay it. */
 function canScan() {
-  if (serverKeyed()) return true;
-  if (!S.apiKey) return false;
-  const p = keyProvider(S.apiKey);
-  if (!p) return false;
-  return p === "anthropic" || hasProxy();
+  if (usingOwnKey()) {
+    const p = keyProvider(S.apiKey);
+    return p === "anthropic" || (p === "nvidia" && hasProxy());
+  }
+  return serverKeyed();
 }
 function notReadyMessage() {
   if (!S.apiKey) return "Add an API key in Settings first.";
@@ -499,8 +506,8 @@ async function analyzeViaProxy({ imageB64, description, correction, previous }) 
     body: JSON.stringify({ imageB64, description, correction,
       previous: previous ? sanitize(previous) : undefined,
       model: activeModel(),
-      /* Only sent when the server has no key of its own; it ignores it otherwise. */
-      apiKey: serverKeyed() ? undefined : S.apiKey }),
+      /* Sent only when you've chosen your own key over the server's. */
+      apiKey: usingOwnKey() ? S.apiKey : undefined }),
   });
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error((data && data.error) || "Analysis failed. Please try again.");
@@ -1060,13 +1067,15 @@ function viewSettings() {
     <header><h1>Settings</h1></header>
     <section class="card" style="padding:20px;margin-top:18px">
       <h2 style="font-size:14px">API key</h2>
-      ${serverKeyed() ? `
+      ${serverKeyed() && !S.overrideKey ? `
         <p class="muted" style="margin-top:4px">This site's server function holds the key, so it never reaches your browser and nothing needs entering here.</p>
         <div style="margin-top:12px">${keyBadgeHtml(S.proxy.provider, "server")}</div>
         ${S.proxy.model ? `<p class="muted" style="margin-top:6px">Model: <b style="color:var(--ink)">${esc(S.proxy.model)}</b></p>` : ""}
-        <p class="muted" style="margin-top:8px">✓ Ready. Change the key in Netlify → Site configuration → Environment variables — no redeploy needed.</p>`
+        <p class="muted" style="margin-top:8px">✓ Ready. This comes from <b style="color:var(--ink)">${S.proxy.provider === "nvidia" ? "NVIDIA_API_KEY" : "ANTHROPIC_API_KEY"}</b> in Netlify → Site configuration → Environment variables. Change or remove it there — no redeploy needed.</p>
+        <button class="btn ghost" style="margin-top:12px;padding:12px" onclick="startOverride()">Use my own key instead</button>`
       : `
-        <p class="muted" style="margin-top:4px">An <b>NVIDIA</b> key from <b>build.nvidia.com</b>, or an <b>Anthropic</b> one. Stored only in this browser.</p>
+        ${serverKeyed() ? `<p class="muted" style="margin-top:4px">This site is set up with an <b>${esc(PROVIDER_STYLE[S.proxy.provider] ? PROVIDER_STYLE[S.proxy.provider].name : String(S.proxy.provider))}</b> key. Save an <b>NVIDIA</b> key from <b>build.nvidia.com</b> below to use your own instead — stored in this browser, spending your quota rather than the site's. <button onclick="cancelOverride()" style="border:0;background:none;padding:0;font:inherit;color:var(--ink);font-weight:600;text-decoration:underline;cursor:pointer">Keep the site's key</button></p>`
+        : `<p class="muted" style="margin-top:4px">An <b>NVIDIA</b> key from <b>build.nvidia.com</b>, or an <b>Anthropic</b> one. Stored only in this browser.</p>`}
         <input id="apiKey" type="password" placeholder="nvapi-…" value="${esc(keyInputValue())}" style="margin-top:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" autocomplete="off" spellcheck="false" oninput="onKeyInput()"/>
         <div id="keyBadge" style="margin-top:10px;font-size:13px">${keyBadgeHtml(keyProvider(keyInputValue()), keyInputValue())}</div>
         <div class="row" style="margin-top:12px">
@@ -1203,12 +1212,16 @@ function nvModelOptions() {
   if (c && c.state === "ok" && c.provider === "nvidia" && c.models.length) return c.models;
   return Object.keys(NVIDIA_MODELS);
 }
+/* Escape hatch when the site is configured for the provider you don't want. */
+function startOverride() { S.overrideKey = true; S.keyCheck = null; save(); render(); }
+function cancelOverride() { S.overrideKey = false; S.keyDraft = null; S.keyCheck = null; save(); render(); }
 function saveKey() {
   const el = document.getElementById("apiKey");
   if (!el) return;
   S.apiKey = el.value.trim();
   S.keyDraft = null;                                      // committed, so the draft is spent
   S.keyCheck = null;                                      // a new key invalidates the last check
+  if (!S.apiKey) S.overrideKey = false;                   // cleared the box: fall back to the site's key
   save(); render();
 }
 function setModel(id) { if (MODELS[id]) { S.model = id; save(); render(); } }
@@ -1232,7 +1245,7 @@ function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
   Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "",
-    keyDraft: null, model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
+    overrideKey: false, keyDraft: null, model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
   OB.step = 0; OB.manual = false;
   render();
 }

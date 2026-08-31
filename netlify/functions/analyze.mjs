@@ -319,16 +319,20 @@ export default async function handler(req) {
 
   if (!payload?.imageB64 && !payload?.description) return fail("Nothing to analyze.", 400);
 
-  /* A key configured on the server always wins, so a deployed site keeps using
-     its own credentials no matter what a caller sends. */
+  /* A caller who supplies their own key spends their own quota, so let it win
+     over the server's — that is the escape hatch when the site is configured
+     for one provider and you want the other. Falls back to the server key. */
   let name = envName, key = envKey;
-  if (!hasServerKey) {
-    if (!clientKey) return fail("No API key yet — add one in Settings.", 503);
-    name = detectProvider(clientKey);
-    if (!name) return fail('Unrecognized key format. NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".', 400);
+  if (clientKey) {
+    const detected = detectProvider(clientKey);
+    if (!detected) return fail('Unrecognized key format. NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".', 400);
+    name = detected;
     key = clientKey;
+  } else if (!hasServerKey) {
+    return fail("No API key yet — add one in Settings.", 503);
   }
-  payload.usingClientKey = !hasServerKey;
+  /* Only a caller spending their own key may choose the model. */
+  payload.usingClientKey = !!clientKey;
 
   try {
     return name === "nvidia" ? await callNvidia(key, payload) : await callAnthropic(key, payload);
