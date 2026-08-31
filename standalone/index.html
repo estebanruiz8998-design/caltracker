@@ -223,7 +223,8 @@ const S = {
   profile: null,          // {sex, age, heightCm, weightKg, activity, mode}
   goals: null,            // {calories, protein_g, carbs_g, fat_g}
   logs: [],
-  apiKey: "",             // the key pasted in Settings, when the server has none
+  apiKey: "",             // the saved key, used when the server has none
+  keyDraft: null,         // what's typed in the key box; survives a failed test
   proxy: null,            // what the server function reports; null until probed
   keyCheck: null,         // {state:"testing"|"ok"|"bad", message, models[]}
   model: null,            // resolved in load()
@@ -1065,9 +1066,9 @@ function viewSettings() {
         ${S.proxy.model ? `<p class="muted" style="margin-top:6px">Model: <b style="color:var(--ink)">${esc(S.proxy.model)}</b></p>` : ""}
         <p class="muted" style="margin-top:8px">✓ Ready. Change the key in Netlify → Site configuration → Environment variables — no redeploy needed.</p>`
       : `
-        <p class="muted" style="margin-top:4px">Paste an <b>NVIDIA</b> key (<code>nvapi-…</code>) from <b>build.nvidia.com</b>, or an <b>Anthropic</b> key (<code>sk-ant-…</code>). Stored only in this browser.</p>
-        <input id="apiKey" type="password" placeholder="nvapi-…" value="${esc(S.apiKey)}" style="margin-top:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" autocomplete="off" spellcheck="false" oninput="onKeyInput()"/>
-        <div id="keyBadge" style="margin-top:10px;font-size:13px">${keyBadgeHtml(keyProvider(S.apiKey), S.apiKey)}</div>
+        <p class="muted" style="margin-top:4px">An <b>NVIDIA</b> key from <b>build.nvidia.com</b>, or an <b>Anthropic</b> one. Stored only in this browser.</p>
+        <input id="apiKey" type="password" placeholder="nvapi-…" value="${esc(keyInputValue())}" style="margin-top:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" autocomplete="off" spellcheck="false" oninput="onKeyInput()"/>
+        <div id="keyBadge" style="margin-top:10px;font-size:13px">${keyBadgeHtml(keyProvider(keyInputValue()), keyInputValue())}</div>
         <div class="row" style="margin-top:12px">
           <button class="btn ghost" style="padding:12px" onclick="testKey()" ${S.keyCheck && S.keyCheck.state === "testing" ? "disabled" : ""}>${S.keyCheck && S.keyCheck.state === "testing" ? "Testing…" : "Test key"}</button>
           <button class="btn" style="padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
@@ -1116,7 +1117,7 @@ function viewSettings() {
     </section>
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">About</h2>
-      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with vision AI (${esc(activeModel() || "no key yet")}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
+      <p class="muted" style="margin-top:8px;line-height:1.6">CalTracker analyzes food photos with vision AI (${esc(activeProvider() ? activeModel() : "no key yet")}) and logs them automatically toward your plan. Nutrition values are estimates — not medical or dietary advice. All data lives in this browser.</p>
     </section>
     <section class="card" style="padding:20px;margin-top:12px;text-align:center">
       <button onclick="wipeAll()" style="border:0;background:none;font:inherit;font-size:14px;font-weight:700;color:var(--danger);cursor:pointer;padding:6px 12px">
@@ -1141,25 +1142,32 @@ function keyBadgeHtml(p, raw) {
     + `<span style="width:9px;height:9px;border-radius:50%;background:${st.color}"></span>${st.name}</span>`
     + `<span class="muted"> · ${st.note}</span>`;
 }
+/* What belongs in the key box: the unsaved draft if there is one, else the
+   saved key. Without this a failed test would blank out what you just typed. */
+function keyInputValue() {
+  return S.keyDraft !== null && S.keyDraft !== undefined ? S.keyDraft : S.apiKey;
+}
 /* Repaint the badge in place — a full render would steal focus mid-typing. */
 function onKeyInput() {
   const el = document.getElementById("apiKey"), badge = document.getElementById("keyBadge");
-  if (!el || !badge) return;
-  const raw = el.value.trim();
-  badge.innerHTML = keyBadgeHtml(keyProvider(raw), raw);
+  if (!el) return;
+  S.keyDraft = el.value.trim();
+  if (badge) badge.innerHTML = keyBadgeHtml(keyProvider(S.keyDraft), S.keyDraft);
 }
 function keyCheckHtml() {
   const c = S.keyCheck;
   if (!c || c.state === "testing") return "";
   if (c.state === "bad") return `<p class="err" style="margin-top:10px">✗ ${esc(c.message)}</p>`;
-  return `<p style="margin-top:10px;font-size:13px;color:#0a5c0a;font-weight:600">✓ Key works — ${esc(String(c.provider))} accepted it`
-    + `${c.total ? ` and lists ${c.total} models` : ""}.</p>`;
+  const name = PROVIDER_STYLE[c.provider] ? PROVIDER_STYLE[c.provider].name : String(c.provider);
+  return `<p style="margin-top:10px;font-size:13px;color:#0a5c0a">✓ <b>${esc(name)} accepted this key</b>`
+    + `${c.total ? ` · ${c.total} models available` : ""}</p>`;
 }
 /* Asks the function to check the key against its provider, which is the only
    way to test an NVIDIA key from a browser. */
 async function testKey() {
   const el = document.getElementById("apiKey");
-  const raw = (el ? el.value : S.apiKey).trim();
+  const raw = (el ? el.value : keyInputValue()).trim();
+  S.keyDraft = raw;                                       // keep it on screen whatever happens
   if (!raw) { S.keyCheck = { state: "bad", message: "Paste a key first." }; render(); return; }
   if (!keyProvider(raw)) {
     S.keyCheck = { state: "bad", message: 'Unrecognized key format — NVIDIA keys start with "nvapi-", Anthropic keys with "sk-ant-".' };
@@ -1199,6 +1207,7 @@ function saveKey() {
   const el = document.getElementById("apiKey");
   if (!el) return;
   S.apiKey = el.value.trim();
+  S.keyDraft = null;                                      // committed, so the draft is spent
   S.keyCheck = null;                                      // a new key invalidates the last check
   save(); render();
 }
@@ -1223,7 +1232,7 @@ function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
   Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "",
-    model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
+    keyDraft: null, model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
   OB.step = 0; OB.manual = false;
   render();
 }
