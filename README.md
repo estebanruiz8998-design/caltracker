@@ -68,13 +68,16 @@ redeploy of the HTML.
 | **Environment variable** (recommended) | Netlify, server-side | everyone visiting the site |
 | **Settings screen** | that browser's localStorage | just that browser |
 
-The environment variable always wins: once it is set, the app stops asking for
-a key and callers cannot override it or the model it uses.
+The environment variable is the default: once set, the app stops asking for a
+key, and Settings names the variable it came from. **Use my own key instead**
+reveals the key box and overrides it for that browser, so a site configured for
+one provider doesn't trap you there. The model is never a caller's choice — on
+NVIDIA it is fixed, and on the server's key the server decides.
 
-Without it, the app takes a key in **Settings → API key**. Keys identify their
+Either way the app takes a key in **Settings → API key**. Keys identify their
 own provider — `nvapi-…` routes to NVIDIA, `sk-ant-…` to Anthropic — so pasting
 one is all the configuration needed. **Test key** checks it against the provider
-and lists the vision models it can reach, which then populate the model picker.
+and reports whether it was accepted.
 
 An NVIDIA key still travels through the function on each scan, because browsers
 are blocked from calling NVIDIA directly (no CORS). Without the function
@@ -116,27 +119,23 @@ If `meta/llama-3.2-90b-vision-instruct` is missing from that list, your key
 can't reach it — set `NVIDIA_MODEL` to a vision model that is listed.
 
 Which models a key can reach depends on your tier and credits, not on what the
-catalog advertises — and the catalog can't tell you which one is actually good
-at estimating portions from a photo. To settle both, ask your key directly.
-
-Check that a key works and see what it can reach:
+catalog advertises. To check a key without deploying anything:
 
 ```bash
 NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs
 ```
 
-Then benchmark the candidates against a real meal:
+It says whether the key works and whether it reaches the app's model, naming
+the alternatives if not. Add a photo to run a real analysis through it:
 
 ```bash
 NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs meal.jpg --expect 520
 ```
 
-It lists what your key can reach, filters to vision models, sends each the
-exact request the function sends in production, and ranks the ones that return
-a schema-valid analysis — by closeness to `--expect` when you pass a known
-calorie count, otherwise by detail and latency. It prints the `NVIDIA_MODEL=`
-line to paste into Netlify. Add `--all` to test every listed model, or
-`--concurrency 1` if you get rate limited.
+That sends exactly what the function sends in production and reports calories,
+items and **latency** — watch the ms column, since anything near 10s will be
+cut off once deployed. `--all` tries every model the key lists, `--concurrency 1`
+if you get rate limited.
 
 NVIDIA's OpenAI-compatible API has no guaranteed structured-output support —
 it varies per model — so the function asks for JSON in the prompt and parses
