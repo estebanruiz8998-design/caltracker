@@ -39,7 +39,8 @@ mobile browsers.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | both | Anthropic key. Server-side only; never exposed to the browser. |
 | `NVIDIA_API_KEY` | standalone | NVIDIA key (`nvapi-...`). When set, the function uses NVIDIA instead of Anthropic. |
-| `NVIDIA_MODEL` | standalone | Vision model id. Defaults to `meta/llama-3.2-90b-vision-instruct`. |
+| `NVIDIA_MODEL` | standalone | Escape hatch only. The app is built around `meta/llama-3.2-90b-vision-instruct`; change this only if your key can't reach it. |
+| `NVIDIA_TIMEOUT_MS` | standalone | How long to wait for NVIDIA before giving up (default 8500). Keep it under your Netlify function timeout. |
 | `NVIDIA_JSON_MODE` | standalone | `off` (default), `json_object`, or `json_schema`. Only turn on if the model supports it. |
 | `AI_PROVIDER` | standalone | Force `nvidia` or `anthropic` when both keys are present. |
 
@@ -80,7 +81,29 @@ are blocked from calling NVIDIA directly (no CORS). Without the function
 deployed, only Anthropic keys work, and the app says so rather than failing at
 scan time.
 
-### Choosing an NVIDIA model
+### The NVIDIA model, and the 10-second wall
+
+The app uses one model, `meta/llama-3.2-90b-vision-instruct`, and the whole
+request is shaped around a hard constraint: **Netlify stops a synchronous
+function at 10 seconds.** A 90B vision model writing this app's full schema
+routinely runs past that, and Netlify's kill arrives as an HTML error page —
+which the browser can only report as a bare "Analysis failed".
+
+Three things keep it inside the window:
+
+- **A compact wire format.** The model answers with short keys (`nm`, `it`,
+  `cal`) that `expandAnalysis()` maps back to the app's fields. Measured on a
+  realistic five-item meal that is 31% fewer output tokens — roughly 8.2s down
+  to 5.6s at 25 tok/s — and output tokens are what the time is spent on.
+- **A smaller photo.** 640px rather than 1024, which shortens the call and
+  stays clear of NVIDIA's inline-image cap.
+- **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (8.5s) so
+  the failure comes back as JSON explaining itself, instead of Netlify's HTML.
+
+If scans still time out, the honest fixes are fewer foods per photo, or a
+Netlify plan with a longer function timeout (then raise `NVIDIA_TIMEOUT_MS`).
+
+### Checking a key
 
 The default is a guess at what your account can reach. To see the real list,
 open your deployed function with `?models=1`:
@@ -89,8 +112,8 @@ open your deployed function with `?models=1`:
 https://<your-site>.netlify.app/.netlify/functions/analyze?models=1
 ```
 
-Pick a **vision-capable** id from that list and set it as `NVIDIA_MODEL`.
-A wrong id comes back as a 404 with the same hint.
+If `meta/llama-3.2-90b-vision-instruct` is missing from that list, your key
+can't reach it — set `NVIDIA_MODEL` to a vision model that is listed.
 
 Which models a key can reach depends on your tier and credits, not on what the
 catalog advertises — and the catalog can't tell you which one is actually good

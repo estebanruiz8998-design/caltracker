@@ -18,7 +18,6 @@
 
 export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-90b-vision-instruct";
 export const ANTHROPIC_MODELS = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"];
 
 /* Model ids that look image-capable, used to shortlist NVIDIA_MODEL candidates. */
@@ -69,6 +68,68 @@ Given a photo (and/or description) of food, identify the meal and estimate its n
 export const JSON_RULES = `\n\nRespond with a single JSON object and nothing else — no prose, no markdown fences.
 It must match this JSON Schema exactly:
 ${JSON.stringify(SCHEMA)}`;
+
+/* The one NVIDIA model this app supports: the vision model free-tier keys
+   reliably reach. Everything below is tuned for it. */
+export const NVIDIA_MODEL_ID = "meta/llama-3.2-90b-vision-instruct";
+
+/* Netlify stops a synchronous function at 10s. A 90B vision model writing the
+   app's full schema often runs past that, and the kill comes back as an HTML
+   error the browser can only report as "Analysis failed". So: spend fewer
+   output tokens, and abort first ourselves so the failure is a readable JSON
+   error instead. Raise NVIDIA_TIMEOUT_MS if your plan allows a longer one. */
+export function nvidiaBudgetMs() {
+  return Math.max(1000, Number(process.env.NVIDIA_TIMEOUT_MS) || 8500);
+}
+
+/* Output tokens are what the budget is spent on, and the app's field names are
+   most of the reply. Short keys cut it roughly a quarter; expanded below. */
+export const COMPACT_RULES = `
+
+Reply with ONE compact JSON object and nothing else. No markdown, no code fences, no commentary.
+Use exactly these keys:
+{"ok":true,"nm":"Chicken Caesar Salad","em":"🥗","it":[{"n":"Grilled chicken","q":"120 g","c":198,"p":37,"cb":0,"f":4}],"cal":520,"pr":38,"ca":18,"ft":33,"hs":7,"cf":"high","nt":"Assumed full-fat dressing."}
+Rules:
+- ok is false only when the photo shows no food or drink; then every number is 0.
+- it holds at most 6 items, largest first. Merge anything trivial into a larger one.
+- Every number is a plain integer, grams or kcal. No units, no ranges, no nulls, no maths.
+- cal/pr/ca/ft are the totals and must equal the sum of it[].
+- hs is 1-10, cf is "low", "medium" or "high", nt is at most 100 characters.`;
+
+const NUM = (v) => { const n = typeof v === "number" ? v : parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+/* Accepts the compact shape, and the long-form one for a model that ignores the
+   key instruction, so a verbose reply is still usable rather than an error. */
+export function expandAnalysis(o) {
+  if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+  const items = (Array.isArray(o.it) ? o.it : Array.isArray(o.items) ? o.items : []).map((i) => ({
+    name: String(i?.n ?? i?.name ?? "Item"),
+    quantity: String(i?.q ?? i?.quantity ?? ""),
+    calories: NUM(i?.c ?? i?.calories), protein_g: NUM(i?.p ?? i?.protein_g),
+    carbs_g: NUM(i?.cb ?? i?.carbs_g), fat_g: NUM(i?.f ?? i?.fat_g),
+  }));
+  const sum = (k) => items.reduce((t, i) => t + i[k], 0);
+  /* A model that itemises well but fumbles the totals is common, so fall back
+     to the item sum rather than logging a zero-calorie meal. */
+  const total = (short, long, key) => {
+    const v = o[short] ?? o[long];
+    return v === undefined || v === null || NUM(v) === 0 ? sum(key) : NUM(v);
+  };
+  const conf = o.cf ?? o.confidence;
+  return {
+    is_food: o.ok !== undefined ? !!o.ok : !!o.is_food,
+    food_name: String(o.nm ?? o.food_name ?? "Unknown food"),
+    emoji: String(o.em ?? o.emoji ?? "🍽️"),
+    items,
+    calories: total("cal", "calories", "calories"),
+    protein_g: total("pr", "protein_g", "protein_g"),
+    carbs_g: total("ca", "carbs_g", "carbs_g"),
+    fat_g: total("ft", "fat_g", "fat_g"),
+    health_score: NUM(o.hs ?? o.health_score) || 5,
+    confidence: ["low", "medium", "high"].includes(conf) ? conf : "medium",
+    notes: String(o.nt ?? o.notes ?? ""),
+  };
+}
 
 function serverProvider() {
   const forced = (process.env.AI_PROVIDER || "").trim().toLowerCase();
@@ -133,15 +194,13 @@ export function extractJson(text) {
 }
 
 async function callNvidia(key, payload) {
-  /* Only a caller spending their own key may choose the model. On the server's
-     key the server decides, so a caller can't aim it at a pricier model. */
-  const requested = typeof payload.model === "string" && /^[\w.\-]+\/[\w.\-]+$/.test(payload.model.trim())
-    ? payload.model.trim() : "";
-  const model = payload.usingClientKey
-    ? (requested || process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL)
-    : (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL);
-  const instruction = instructionFor(payload) + JSON_RULES;
+  /* One model, fixed. NVIDIA_MODEL stays as an escape hatch, but nothing a
+     caller sends can change it. */
+  const model = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
+  const started = Date.now();
+  const diag = (extra) => ({ model, ms: Date.now() - started, ...extra });
 
+  const instruction = instructionFor(payload) + COMPACT_RULES;
   /* Text-only requests use a plain string so models without vision still work. */
   const content = payload.imageB64
     ? [
@@ -153,7 +212,9 @@ async function callNvidia(key, payload) {
   const body = {
     model,
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content }],
-    max_tokens: 2048,
+    /* Room for six itemised foods in the compact shape, and low enough that a
+       runaway reply fails fast instead of eating the whole budget. */
+    max_tokens: 700,
     temperature: 0.2,
     top_p: 0.7,
   };
@@ -164,36 +225,63 @@ async function callNvidia(key, payload) {
     body.response_format = { type: "json_schema", json_schema: { name: "meal_analysis", schema: SCHEMA, strict: true } };
   }
 
-  const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  });
+  /* Abort before Netlify does: its own timeout returns HTML the browser can
+     only render as a generic failure, whereas this returns a reason. */
+  const budgetMs = nvidiaBudgetMs();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  let res;
+  try {
+    res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      return fail(`The model didn't answer within ${Math.round(budgetMs / 1000)}s, so the request was cut off. Busy plates take longest — retry, or photograph one dish at a time.`,
+        504, diag({ stage: "timeout" }));
+    }
+    return fail("Couldn't reach NVIDIA.", 502, diag({ stage: "network", detail: String(e?.message || e).slice(0, 200) }));
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const raw = await res.text();
-    if (res.status === 401 || res.status === 403) return fail("Invalid NVIDIA API key — check NVIDIA_API_KEY in Netlify.", 401);
-    if (res.status === 404) {
-      return fail(`NVIDIA has no model "${model}". Open this function with ?models=1 to list the ids your key can use, then set NVIDIA_MODEL.`, 404);
+    let apiMsg = "";
+    try {
+      const j = JSON.parse(raw);
+      apiMsg = j?.detail?.message || (typeof j?.detail === "string" ? j.detail : "") || j?.message || j?.error?.message || "";
+    } catch { apiMsg = raw.slice(0, 200); }
+    apiMsg = String(apiMsg).trim().slice(0, 200);
+    const d = diag({ stage: "http", status: res.status, apiMsg });
+
+    if (res.status === 401) return fail("NVIDIA rejected the key. Regenerate it at build.nvidia.com, then update NVIDIA_API_KEY.", 401, d);
+    /* 403 here is far more often an exhausted free allowance than a bad key. */
+    if (res.status === 402 || res.status === 403) {
+      return fail(`NVIDIA refused the request — usually free credits used up, or this key has no access to ${model}.${apiMsg ? " " + apiMsg : ""}`, 402, d);
     }
-    if (res.status === 429) return fail("Rate limited by NVIDIA — wait a moment and try again.", 429);
-    if (res.status === 413) return fail("Photo too large for this NVIDIA model. Lower imageMaxEdge and retry.", 413);
-    return fail("NVIDIA request failed.", 502, raw.slice(0, 400));
+    if (res.status === 404) return fail(`NVIDIA has no model "${model}" for this key. Open this function with ?models=1 to see what it can reach.`, 404, d);
+    if (res.status === 429) return fail("NVIDIA rate limit reached — wait a minute. Free keys allow only a few requests per minute.", 429, d);
+    if (res.status === 413 || res.status === 422) return fail("NVIDIA rejected the photo as too large. Retake it — the app will send a smaller copy.", 413, d);
+    if (res.status >= 500) return fail("NVIDIA had a server error. Try again in a moment.", 502, d);
+    return fail(apiMsg || `NVIDIA returned HTTP ${res.status}.`, 502, d);
   }
 
   const data = await res.json();
   const choice = data?.choices?.[0];
-  if (choice?.finish_reason === "length") return fail("Analysis ran too long. Please try again.", 502);
-
-  const parsed = extractJson(choice?.message?.content);
-  if (!parsed) {
-    return fail(
-      `${model} did not return usable JSON. Try a different NVIDIA_MODEL, or set NVIDIA_JSON_MODE=json_object if this model supports it.`,
-      502,
-      String(choice?.message?.content ?? "").slice(0, 400),
-    );
+  const text = choice?.message?.content;
+  if (choice?.finish_reason === "length") {
+    return fail("The model ran out of room mid-answer. Try a photo with fewer separate foods.", 502, diag({ stage: "length" }));
   }
-  return json({ analysis: parsed, provider: "nvidia", model });
+  const analysis = expandAnalysis(extractJson(text));
+  if (!analysis) {
+    return fail("The model replied with something that isn't an analysis. Try again.", 502,
+      diag({ stage: "unparsable", reply: String(text ?? "").slice(0, 300) }));
+  }
+  return json({ analysis, provider: "nvidia", model, ms: Date.now() - started });
 }
 
 async function callAnthropic(key, payload) {
@@ -292,9 +380,10 @@ export default async function handler(req) {
          caller still needs to supply a key of their own. */
       serverKey: hasServerKey,
       provider: hasServerKey ? envName : null,
-      model: envName === "nvidia" ? (process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL) : null,
-      /* NVIDIA caps inline image payloads well below Anthropic's limit. */
-      imageMaxEdge: envName === "nvidia" ? 768 : 1024,
+      model: envName === "nvidia" ? (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID) : null,
+      /* Smaller than Anthropic's limit allows: NVIDIA caps inline images, and a
+         smaller photo also shortens the call, which is what the budget is for. */
+      imageMaxEdge: envName === "nvidia" ? 640 : 1024,
       modelPicker: envName !== "nvidia",
       hint: hasServerKey ? undefined
         : "No key on the server. Paste one in Settings, or set NVIDIA_API_KEY in Netlify → Site configuration → Environment variables.",

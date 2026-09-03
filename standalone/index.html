@@ -203,14 +203,12 @@ const MODELS = {
   "claude-sonnet-5": { label: "Balanced — Sonnet 5", hint: "≈ $0.01 per scan · sharper on mixed plates" },
   "claude-opus-4-8": { label: "Best — Opus 4.8", hint: "≈ $0.03 per scan · most accurate portions" },
 };
-/* Fallback shortlist, replaced by the real list once a key is verified. */
-const NVIDIA_MODELS = {
-  "meta/llama-4-maverick-17b-128e-instruct": { label: "Llama 4 Maverick", hint: "Tightest instruction-following — most reliable JSON" },
-  "qwen/qwen2.5-vl-72b-instruct": { label: "Qwen2.5-VL 72B", hint: "Sharpest on portion sizes from visual detail" },
-  "meta/llama-3.2-90b-vision-instruct": { label: "Llama 3.2 90B Vision", hint: "Safe default — widely available" },
-};
+/* One NVIDIA model, fixed: the vision model free-tier keys reliably reach, and
+   the only one this app is tuned for. The server decides it; nothing here can
+   change it, so there is no NVIDIA model picker. */
+const NVIDIA_MODEL_ID = "meta/llama-3.2-90b-vision-instruct";
+const NVIDIA_MODEL_LABEL = "Llama 3.2 90B Vision";
 const DEFAULT_MODEL = MODELS[CONFIG.MODEL] ? CONFIG.MODEL : "claude-haiku-4-5";
-const DEFAULT_NV_MODEL = Object.keys(NVIDIA_MODELS)[0];
 
 /* A key announces its own provider, so pasting one is all the routing needed. */
 function keyProvider(k) {
@@ -228,8 +226,8 @@ const S = {
   keyDraft: null,         // what's typed in the key box; survives a failed test
   proxy: null,            // what the server function reports; null until probed
   keyCheck: null,         // {state:"testing"|"ok"|"bad", message, models[]}
+  lastDiag: null,         // what the server reported about the last call
   model: null,            // resolved in load()
-  nvModel: null,          // NVIDIA model id, resolved in load()
   tab: "home",            // home | analytics | plan | settings
   selectedDay: null,
   scan: null,
@@ -265,17 +263,15 @@ function load() {
     S.logs = Array.isArray(raw.logs) ? raw.logs : [];
     S.apiKey = raw.apiKey || "";
     S.model = MODELS[raw.model] ? raw.model : null;
-    S.nvModel = typeof raw.nvModel === "string" && raw.nvModel ? raw.nvModel : null;
     S.overrideKey = !!raw.overrideKey;
   } catch (e) { /* corrupted storage — start fresh */ }
   // Baked-in fallbacks: used whenever nothing has been saved in this browser.
   if (!S.apiKey && CONFIG.API_KEY) S.apiKey = CONFIG.API_KEY;
   if (!S.model) S.model = DEFAULT_MODEL;
-  if (!S.nvModel) S.nvModel = DEFAULT_NV_MODEL;
 }
 function save() {
   const data = { profile: S.profile, goals: S.goals, logs: S.logs, apiKey: S.apiKey,
-    overrideKey: S.overrideKey, model: S.model, nvModel: S.nvModel };
+    overrideKey: S.overrideKey, model: S.model };
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch (e) {
     try { data.logs = data.logs.map(({ photo, ...rest }) => rest); localStorage.setItem(KEY, JSON.stringify(data)); }
@@ -303,11 +299,15 @@ function activeProvider() {
   return serverKeyed() ? S.proxy.provider : null;
 }
 function activeModel() {
-  return activeProvider() === "nvidia" ? S.nvModel : S.model;
+  if (activeProvider() !== "nvidia") return S.model;
+  /* The server owns the NVIDIA model; use what it reports when it told us. */
+  return (serverKeyed() && !usingOwnKey() && S.proxy.model) || NVIDIA_MODEL_ID;
 }
 /* NVIDIA caps inline image payloads well below Anthropic's limit. */
 function imageMaxEdge() {
-  if (activeProvider() === "nvidia") return 768;
+  /* Smaller for NVIDIA: it caps inline images, and a smaller photo also
+     shortens the call, which is what keeps it inside the function timeout. */
+  if (activeProvider() === "nvidia") return 640;
   return serverKeyed() && !usingOwnKey() ? (S.proxy.imageMaxEdge || 1024) : 1024;
 }
 /* Browsers cannot call NVIDIA directly (no CORS), so an nvapi- key is only
@@ -510,8 +510,18 @@ async function analyzeViaProxy({ imageB64, description, correction, previous }) 
       apiKey: usingOwnKey() ? S.apiKey : undefined }),
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error((data && data.error) || "Analysis failed. Please try again.");
+  if (!res.ok) {
+    /* Netlify's own timeout returns an HTML page, not our JSON — say so rather
+       than the blank "Analysis failed" that leaves nothing to act on. */
+    const msg = (data && data.error)
+      || (res.status === 502 || res.status === 504
+        ? "The scan took too long and the server cut it off. Retry — busy plates are the slowest."
+        : `The server returned HTTP ${res.status}.`);
+    S.lastDiag = (data && data.detail) || { status: res.status };
+    throw new Error(msg);
+  }
   if (!data || !data.analysis) throw new Error("No analysis returned. Please try again.");
+  S.lastDiag = data.ms ? { ms: data.ms, model: data.model } : null;
   return data.analysis;
 }
 
@@ -1083,25 +1093,21 @@ function viewSettings() {
           <button class="btn" style="padding:12px" onclick="saveKey()">${S.apiKey ? "Update key" : "Save key"}</button>
         </div>
         ${keyCheckHtml()}
-        ${keyProvider(S.apiKey) === "nvidia" && !hasProxy() ? `
+        ${keyProvider(keyInputValue()) === "nvidia" && !hasProxy() ? `
           <p class="err" style="margin-top:10px">NVIDIA keys can't be used from a plain static file — browsers are blocked from calling NVIDIA directly. Deploy this repo to Netlify so the server function can relay it.</p>` : ""}`}
     </section>
+    ${activeProvider() === "nvidia" ? `
+    <section class="card" style="padding:20px;margin-top:12px">
+      <h2 style="font-size:14px">AI model</h2>
+      <p class="muted" style="margin-top:4px">Fixed — the whole scan pipeline is tuned for this one model.</p>
+      <div class="opt on" style="margin-top:12px;cursor:default">
+        <span><span class="t">${NVIDIA_MODEL_LABEL}</span><span class="h">${esc(activeModel())}</span></span>
+      </div>
+    </section>` : ""}
     ${showModelPicker() ? `
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">AI model</h2>
-      ${activeProvider() === "nvidia" ? `
-        <p class="muted" style="margin-top:4px">Must be vision-capable. ${S.keyCheck && S.keyCheck.state === "ok" && S.keyCheck.provider === "nvidia"
-          ? `Showing the ${S.keyCheck.models.length} your key can reach.`
-          : "Test your key above to list the ones your key can actually reach."}</p>
-        <div style="margin-top:12px;max-height:280px;overflow-y:auto">
-          ${nvModelOptions().map((id) => `
-            <button class="opt ${S.nvModel === id ? "on" : ""}" style="margin-bottom:8px" onclick="setNvModel('${esc(id)}')">
-              <span><span class="t">${esc(NVIDIA_MODELS[id] ? NVIDIA_MODELS[id].label : id)}</span><span class="h">${esc(NVIDIA_MODELS[id] ? NVIDIA_MODELS[id].hint : id)}</span></span>
-              ${S.nvModel === id ? "<span>✓</span>" : ""}
-            </button>`).join("")}
-        </div>
-        ${nvModelOptions().includes(S.nvModel) ? "" : `<p class="muted" style="margin-top:4px">Currently using <b style="color:var(--ink)">${esc(S.nvModel)}</b>.</p>`}`
-      : `
+      ${`
         <p class="muted" style="margin-top:4px">All three are accurate for everyday logging — pick by cost. Charged to your API credits per scan.</p>
         <div style="margin-top:12px">
           ${Object.entries(MODELS).map(([id, m]) => `
@@ -1133,10 +1139,8 @@ function viewSettings() {
         ${S.confirmWipe ? "Tap again to delete everything" : "Delete all data"}</button>
     </section>`;
 }
-function showModelPicker() {
-  if (serverKeyed()) return S.proxy.modelPicker !== false;
-  return !!activeProvider();
-}
+/* Only Anthropic offers a choice; the NVIDIA model is fixed. */
+function showModelPicker() { return activeProvider() === "anthropic"; }
 
 /* NVIDIA green / Anthropic clay, so the key you paste identifies itself. */
 const PROVIDER_STYLE = {
@@ -1199,7 +1203,6 @@ async function testKey() {
       const models = Array.isArray(data.models) ? data.models : [];
       S.keyCheck = { state: "ok", provider: data.provider, models, total: data.total };
       S.apiKey = raw;                                     // a key that works is worth keeping
-      if (data.provider === "nvidia" && models.length && !models.includes(S.nvModel)) S.nvModel = models[0];
       save();
     }
   } catch (e) {
@@ -1207,11 +1210,20 @@ async function testKey() {
   }
   render();
 }
-function nvModelOptions() {
-  const c = S.keyCheck;
-  if (c && c.state === "ok" && c.provider === "nvidia" && c.models.length) return c.models;
-  return Object.keys(NVIDIA_MODELS);
+/* A failed scan is useless without the reason, so show what the server said —
+   status, how long it took, and which stage gave up. */
+function diagHtml() {
+  const d = S.lastDiag;
+  if (!d) return "";
+  const bits = [];
+  if (d.stage) bits.push(d.stage);
+  if (d.status) bits.push("HTTP " + d.status);
+  if (d.ms) bits.push((d.ms / 1000).toFixed(1) + "s");
+  if (d.apiMsg) bits.push(d.apiMsg);
+  if (!bits.length) return "";
+  return `<p class="muted" style="font-size:11px;max-width:300px;word-break:break-word">${esc(bits.join(" · "))}</p>`;
 }
+
 /* Escape hatch when the site is configured for the provider you don't want. */
 function startOverride() { S.overrideKey = true; S.keyCheck = null; save(); render(); }
 function cancelOverride() { S.overrideKey = false; S.keyDraft = null; S.keyCheck = null; save(); render(); }
@@ -1225,7 +1237,6 @@ function saveKey() {
   save(); render();
 }
 function setModel(id) { if (MODELS[id]) { S.model = id; save(); render(); } }
-function setNvModel(id) { if (id) { S.nvModel = id; save(); render(); } }
 function updateWeight() {
   const w = +document.getElementById("w2").value;
   if (!(w >= 25 && w <= 350)) return;
@@ -1245,7 +1256,7 @@ function wipeAll() {
   if (!S.confirmWipe) { S.confirmWipe = true; render(); setTimeout(() => { S.confirmWipe = false; render(); }, 2500); return; }
   localStorage.removeItem(KEY);
   Object.assign(S, { profile: null, goals: null, logs: [], apiKey: CONFIG.API_KEY || "",
-    overrideKey: false, keyDraft: null, model: DEFAULT_MODEL, nvModel: DEFAULT_NV_MODEL, keyCheck: null, confirmWipe: false });
+    overrideKey: false, keyDraft: null, model: DEFAULT_MODEL, keyCheck: null, confirmWipe: false });
   OB.step = 0; OB.manual = false;
   render();
 }
@@ -1292,6 +1303,7 @@ function viewScan() {
       <div style="font-size:40px">😕</div>
       <p class="ink2" style="font-size:14px;font-weight:500;max-width:280px">${esc(sc.error)}</p>
       <button class="btn small" onclick="S.scan.stage='input';S.scan.error='';render()">Try again</button>
+      ${diagHtml()}
     </div>`;
   } else if (sc.stage === "result") {
     body = viewResult(sc);

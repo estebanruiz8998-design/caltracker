@@ -1,24 +1,25 @@
 #!/usr/bin/env node
 /**
- * Picks the NVIDIA_MODEL for this project by testing candidates on the real
- * task with your own key, rather than trusting a catalog listing.
+ * Checks an NVIDIA key against the one model this app uses.
  *
  *   NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs
- *     → verifies the key and lists the vision models it can reach
+ *     → says whether the key works and whether it reaches that model
  *
  *   NVIDIA_API_KEY=nvapi-... node scripts/pick-model.mjs path/to/food-photo.jpg
- *     → also benchmarks each candidate on the real task and ranks them
+ *     → also runs a real analysis and reports calories, items and latency
  *
  * Options
- *   --all              test every model your key lists, not just likely VLMs
- *   --expect <kcal>    known calorie count, to rank by estimate accuracy too
+ *   --all              also try every other model the key lists
+ *   --expect <kcal>    known calorie count, to rank by estimate accuracy
  *   --concurrency <n>  parallel requests (default 3; lower if rate limited)
  *
  * It sends exactly what netlify/functions/analyze.mjs sends in production, so
- * a model that passes here is a model the app will work with.
+ * a pass here means the deployed app will work. Latency matters as much as the
+ * answer: Netlify stops the function at 10s, so watch the ms column.
  */
 import fs from "fs";
-import { SCHEMA, SYSTEM_PROMPT, JSON_RULES, extractJson, NVIDIA_BASE, LOOKS_VISUAL } from "../netlify/functions/analyze.mjs";
+import { SCHEMA, SYSTEM_PROMPT, COMPACT_RULES, extractJson, expandAnalysis, NVIDIA_BASE, LOOKS_VISUAL, NVIDIA_MODEL_ID }
+  from "../netlify/functions/analyze.mjs";
 
 const KEY = process.env.NVIDIA_API_KEY;
 if (!KEY) { console.error("Set NVIDIA_API_KEY first."); process.exit(1); }
@@ -49,19 +50,9 @@ if (bytes && bytes.length > 600_000) {
   console.warn(`⚠  ${photoPath} is ${(bytes.length / 1024 | 0)} KB. Some NVIDIA models cap inline images near 180 KB — a smaller photo gives a fairer test.\n`);
 }
 
-/* Ordered by expected fit for photo calorie estimation: fine-grained visual
-   detail for portion sizing, plus tight instruction-following for the schema.
-   Ordering only breaks ties — the measured result decides. */
-const PREFERRED = [
-  "meta/llama-4-maverick-17b-128e-instruct",
-  "qwen/qwen2.5-vl-72b-instruct",
-  "meta/llama-3.2-90b-vision-instruct",
-  "meta/llama-4-scout-17b-16e-instruct",
-  "google/gemma-3-27b-it",
-  "mistralai/mistral-medium-3-instruct",
-  "meta/llama-3.2-11b-vision-instruct",
-  "microsoft/phi-3.5-vision-instruct",
-];
+/* The app is locked to one model, so that is what gets checked by default.
+   --all still sweeps everything the key can reach, for comparison. */
+const PREFERRED = [NVIDIA_MODEL_ID];
 
 async function listModels() {
   const res = await fetch(`${NVIDIA_BASE}/models`, { headers: { authorization: `Bearer ${KEY}` } });
@@ -95,11 +86,11 @@ async function probe(model) {
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: [
-            { type: "text", text: "Analyze the food in this photo." + JSON_RULES },
+            { type: "text", text: "Analyze the food in this photo." + COMPACT_RULES },
             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageB64}` } },
           ] },
         ],
-        max_tokens: 2048, temperature: 0.2, top_p: 0.7,
+        max_tokens: 700, temperature: 0.2, top_p: 0.7,
       }),
     });
     const ms = Date.now() - started;
@@ -111,7 +102,7 @@ async function probe(model) {
         : body || `HTTP ${res.status}`;
       return { model, ms, ok: false, why };
     }
-    const parsed = extractJson((await res.json())?.choices?.[0]?.message?.content);
+    const parsed = expandAnalysis(extractJson((await res.json())?.choices?.[0]?.message?.content));
     if (!parsed) return { model, ms, ok: false, why: "did not return usable JSON" };
     const problems = grade(parsed);
     return { model, ms, ok: problems.length === 0, why: problems.join(", "), calories: parsed.calories,
@@ -139,23 +130,34 @@ try {
 }
 console.log(`\n✓ Key works — NVIDIA accepted it and lists ${available.length} models.`);
 
-const candidates = TEST_ALL ? available : available.filter((m) => PREFERRED.includes(m) || LOOKS_VISUAL.test(m));
+const reachesDefault = available.includes(NVIDIA_MODEL_ID);
+
+/* Answer the reachability question before anything can bail out — a key that
+   cannot reach the app's model is exactly the case worth explaining. */
+if (CHECK_ONLY) {
+  console.log(`\n${reachesDefault ? "✓" : "✗"} ${NVIDIA_MODEL_ID} — the model this app uses — is ${reachesDefault ? "reachable with this key" : "NOT in this key's list"}.`);
+  if (!reachesDefault) {
+    const others = available.filter((m) => LOOKS_VISUAL.test(m)).sort();
+    console.log(others.length ? `\nVision models this key does list:\n  ${others.join("\n  ")}` : "\nNo vision models listed either.");
+    console.log(`\nSet NVIDIA_MODEL in Netlify to one of those, or use a key that reaches the default.`);
+  } else {
+    console.log(`\nTo check it actually analyses a meal, rerun with a photo:`);
+    console.log(`  node scripts/pick-model.mjs meal.jpg --expect 520`);
+  }
+  process.exit(0);
+}
+
+const candidates = TEST_ALL ? available : available.filter((m) => PREFERRED.includes(m));
 if (!candidates.length) {
-  console.error("\nNo vision-capable models matched. Re-run with --all to test everything your key lists.");
+  console.error(`\n✗ This key does not list ${NVIDIA_MODEL_ID}.`);
+  console.error("  Re-run with --all to try everything it does list, and set NVIDIA_MODEL to whatever passes.");
   process.exit(1);
 }
 candidates.sort((a, b) => {
   const ia = PREFERRED.indexOf(a), ib = PREFERRED.indexOf(b);
   return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
 });
-if (CHECK_ONLY) {
-  console.log(`\n${candidates.length} of them look vision-capable — these are the NVIDIA_MODEL candidates:\n`);
-  for (const m of candidates) console.log(`  ${m}`);
-  console.log(`\nTo find which is actually best at reading portions, rerun with a meal photo:`);
-  console.log(`  node scripts/pick-model.mjs meal.jpg --expect 520`);
-  process.exit(0);
-}
-console.log(`Testing ${candidates.length} vision candidate(s) on ${photoPath}…\n`);
+console.log(`Testing ${candidates.length} model(s) on ${photoPath}…\n`);
 
 const results = await pool(candidates, CONCURRENCY, async (m) => {
   const r = await probe(m);
