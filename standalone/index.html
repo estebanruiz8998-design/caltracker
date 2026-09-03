@@ -227,6 +227,7 @@ const S = {
   proxy: null,            // what the server function reports; null until probed
   keyCheck: null,         // {state:"testing"|"ok"|"bad", message, models[]}
   lastDiag: null,         // what the server reported about the last call
+  diag: null,             // result of the "Diagnose scanning" timing probe
   model: null,            // resolved in load()
   tab: "home",            // home | analytics | plan | settings
   selectedDay: null,
@@ -307,7 +308,7 @@ function activeModel() {
 function imageMaxEdge() {
   /* Smaller for NVIDIA: it caps inline images, and a smaller photo also
      shortens the call, which is what keeps it inside the function timeout. */
-  if (activeProvider() === "nvidia") return 640;
+  if (activeProvider() === "nvidia") return 512;
   return serverKeyed() && !usingOwnKey() ? (S.proxy.imageMaxEdge || 1024) : 1024;
 }
 /* Browsers cannot call NVIDIA directly (no CORS), so an nvapi- key is only
@@ -1103,7 +1104,8 @@ function viewSettings() {
       <div class="opt on" style="margin-top:12px;cursor:default">
         <span><span class="t">${NVIDIA_MODEL_LABEL}</span><span class="h">${esc(activeModel())}</span></span>
       </div>
-    </section>` : ""}
+    </section>
+    ${diagCardHtml()}` : ""}
     ${showModelPicker() ? `
     <section class="card" style="padding:20px;margin-top:12px">
       <h2 style="font-size:14px">AI model</h2>
@@ -1222,6 +1224,52 @@ function diagHtml() {
   if (d.apiMsg) bits.push(d.apiMsg);
   if (!bits.length) return "";
   return `<p class="muted" style="font-size:11px;max-width:300px;word-break:break-word">${esc(bits.join(" · "))}</p>`;
+}
+
+/* Sends a deliberately tiny request so the server can time queue + image
+   prefill on their own, separating "the answer is too long" from "NVIDIA is
+   too busy" — the two have completely different fixes. */
+async function diagnoseScan() {
+  if (!hasProxy()) {
+    S.diag = { state: "bad", text: "This needs the site's server function, which isn't deployed here." };
+    render(); return;
+  }
+  S.diag = { state: "running" }; render();
+  try {
+    const edge = imageMaxEdge();
+    const c = document.createElement("canvas"); c.width = c.height = edge;
+    const g = c.getContext("2d");
+    /* Some structure, so the vision encoder does representative work. */
+    g.fillStyle = "#eeeeee"; g.fillRect(0, 0, edge, edge);
+    for (let i = 0; i < 40; i++) {
+      g.fillStyle = `hsl(${i * 9},60%,55%)`;
+      g.fillRect((i * 37) % edge, (i * 53) % edge, edge / 12, edge / 12);
+    }
+    const b64 = c.toDataURL("image/jpeg", 0.82).split(",")[1];
+    const res = await fetch(PROXY_URL, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "diagnose", imageB64: b64, apiKey: usingOwnKey() ? S.apiKey : undefined }),
+    });
+    const data = await res.json().catch(() => null);
+    S.diag = {
+      state: data && data.ok ? "ok" : "bad",
+      text: (data && (data.verdict || data.error)) || `The server returned HTTP ${res.status}.`,
+      startupMs: data && data.startupMs,
+    };
+  } catch (e) {
+    S.diag = { state: "bad", text: "Couldn't reach the server function." };
+  }
+  render();
+}
+function diagCardHtml() {
+  const d = S.diag;
+  return `
+    <section class="card" style="padding:20px;margin-top:12px">
+      <h2 style="font-size:14px">Scanning speed</h2>
+      <p class="muted" style="margin-top:4px">Scans are cut off if the model takes too long. This times one tiny request to show where the seconds go.</p>
+      <button class="btn ghost" style="margin-top:12px;padding:12px" onclick="diagnoseScan()" ${d && d.state === "running" ? "disabled" : ""}>${d && d.state === "running" ? "Timing…" : "Diagnose scanning"}</button>
+      ${d && d.state !== "running" ? `<p class="${d.state === "ok" ? "muted" : "err"}" style="margin-top:10px;line-height:1.6">${d.state === "ok" ? "" : "✗ "}${esc(d.text)}</p>` : ""}
+    </section>`;
 }
 
 /* Escape hatch when the site is configured for the provider you don't want. */

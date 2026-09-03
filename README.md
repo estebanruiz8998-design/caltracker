@@ -103,8 +103,18 @@ Three things keep it inside the window:
 - **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (8.5s) so
   the failure comes back as JSON explaining itself, instead of Netlify's HTML.
 
-If scans still time out, the honest fixes are fewer foods per photo, or a
-Netlify plan with a longer function timeout (then raise `NVIDIA_TIMEOUT_MS`).
+If scans still time out, **Settings → Scanning speed → Diagnose scanning**
+answers why. It sends one request capped at a single output token, which
+isolates queueing and image prefill from the cost of writing the answer:
+
+- **Startup fast, scans slow** → the answer is the problem. Fewer foods per
+  photo helps; so does a lower item cap in `COMPACT_RULES`.
+- **Startup already eats the budget** → NVIDIA is queueing you, and no amount
+  of shortening will help. Raise `NVIDIA_TIMEOUT_MS` if your Netlify plan
+  allows a longer function, or try again when the free tier is quieter.
+
+Netlify's synchronous limit is 10s on the free tier and configurable up to 26s
+on paid plans. Set `NVIDIA_TIMEOUT_MS` a little under whichever applies.
 
 ### Checking a key
 

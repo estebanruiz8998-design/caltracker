@@ -91,10 +91,10 @@ Use exactly these keys:
 {"ok":true,"nm":"Chicken Caesar Salad","em":"🥗","it":[{"n":"Grilled chicken","q":"120 g","c":198,"p":37,"cb":0,"f":4}],"cal":520,"pr":38,"ca":18,"ft":33,"hs":7,"cf":"high","nt":"Assumed full-fat dressing."}
 Rules:
 - ok is false only when the photo shows no food or drink; then every number is 0.
-- it holds at most 6 items, largest first. Merge anything trivial into a larger one.
+- it holds at most 4 items, largest first. Merge everything else into them.
 - Every number is a plain integer, grams or kcal. No units, no ranges, no nulls, no maths.
 - cal/pr/ca/ft are the totals and must equal the sum of it[].
-- hs is 1-10, cf is "low", "medium" or "high", nt is at most 100 characters.`;
+- hs is 1-10, cf is "low", "medium" or "high", nt is at most 60 characters.`;
 
 const NUM = (v) => { const n = typeof v === "number" ? v : parseFloat(v); return Number.isFinite(n) ? n : 0; };
 
@@ -212,9 +212,9 @@ async function callNvidia(key, payload) {
   const body = {
     model,
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content }],
-    /* Room for six itemised foods in the compact shape, and low enough that a
+    /* Room for four itemised foods in the compact shape, and low enough that a
        runaway reply fails fast instead of eating the whole budget. */
-    max_tokens: 700,
+    max_tokens: 500,
     temperature: 0.2,
     top_p: 0.7,
   };
@@ -240,7 +240,7 @@ async function callNvidia(key, payload) {
     });
   } catch (e) {
     if (e?.name === "AbortError") {
-      return fail(`The model didn't answer within ${Math.round(budgetMs / 1000)}s, so the request was cut off. Busy plates take longest — retry, or photograph one dish at a time.`,
+      return fail(`The model didn't answer within ${(budgetMs / 1000).toFixed(1)}s, so the request was cut off. Retry, photograph one dish at a time, or run "Diagnose scanning" in Settings to see whether it is the answer length or NVIDIA queueing your requests.`,
         504, diag({ stage: "timeout" }));
     }
     return fail("Couldn't reach NVIDIA.", 502, diag({ stage: "network", detail: String(e?.message || e).slice(0, 200) }));
@@ -326,6 +326,56 @@ async function callAnthropic(key, payload) {
   return json({ analysis: parsed, provider: "anthropic", model });
 }
 
+/* Where do the seconds actually go? One request capped at a single output
+   token isolates queue + image prefill from the cost of writing the answer.
+   If startup alone eats the budget, shortening the reply cannot save it. */
+async function diagnose(key, payload) {
+  const model = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
+  const budgetMs = nvidiaBudgetMs();
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  try {
+    const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: payload.imageB64
+          ? [{ type: "text", text: "Reply with one word: ok" },
+             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${payload.imageB64}` } }]
+          : "Reply with one word: ok" }],
+        max_tokens: 1, temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    const startupMs = Date.now() - started;
+    if (!res.ok) {
+      const raw = (await res.text()).slice(0, 200);
+      return json({ ok: false, model, startupMs, budgetMs, status: res.status,
+        verdict: `NVIDIA answered HTTP ${res.status} even for a one-token request. ${raw}` });
+    }
+    await res.text();
+    /* One token means essentially no decoding, so this is the floor: queueing,
+       image encoding and prefill. Everything else is written on top of it. */
+    const share = startupMs / budgetMs;
+    const verdict = share > 0.7
+      ? `The model needs ${(startupMs / 1000).toFixed(1)}s before writing a single character, which already fills the ${(budgetMs / 1000).toFixed(1)}s budget. Shortening the answer cannot fix this — the free tier is queueing your requests. Raise NVIDIA_TIMEOUT_MS if your Netlify plan allows a longer function, or try again when it is less busy.`
+      : share > 0.4
+        ? `Startup alone is ${(startupMs / 1000).toFixed(1)}s of the ${(budgetMs / 1000).toFixed(1)}s budget, leaving little room to write the answer. Photograph one dish at a time, and raise NVIDIA_TIMEOUT_MS if your plan allows.`
+        : `Startup is ${(startupMs / 1000).toFixed(1)}s, comfortably inside the ${(budgetMs / 1000).toFixed(1)}s budget. The time goes into writing the answer, so fewer foods per photo should be enough.`;
+    return json({ ok: true, model, startupMs, budgetMs, verdict });
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      return json({ ok: false, model, budgetMs, timedOut: true,
+        verdict: `NVIDIA did not even acknowledge a one-token request within ${(budgetMs / 1000).toFixed(1)}s. That is queueing or an outage, not the size of the answer. Raise NVIDIA_TIMEOUT_MS if your Netlify plan allows, or try again later.` });
+    }
+    return json({ ok: false, model, budgetMs, verdict: `Could not reach NVIDIA: ${String(e?.message || e).slice(0, 150)}` });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /* Checks a key against its provider and reports the models it can reach.
    This is what the app's "Test key" button calls. */
 async function verifyKey(key) {
@@ -383,7 +433,7 @@ export default async function handler(req) {
       model: envName === "nvidia" ? (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID) : null,
       /* Smaller than Anthropic's limit allows: NVIDIA caps inline images, and a
          smaller photo also shortens the call, which is what the budget is for. */
-      imageMaxEdge: envName === "nvidia" ? 640 : 1024,
+      imageMaxEdge: envName === "nvidia" ? 512 : 1024,
       modelPicker: envName !== "nvidia",
       hint: hasServerKey ? undefined
         : "No key on the server. Paste one in Settings, or set NVIDIA_API_KEY in Netlify → Site configuration → Environment variables.",
@@ -404,6 +454,15 @@ export default async function handler(req) {
     if (!clientKey) return fail("No key to verify.", 400);
     try { return await verifyKey(clientKey); }
     catch (e) { return fail("Could not reach the provider to check the key.", 502, String(e?.message || e).slice(0, 200)); }
+  }
+
+  if (payload?.action === "diagnose") {
+    const dKey = clientKey || envKey;
+    if (!dKey) return fail("No API key to diagnose with.", 503);
+    if ((clientKey ? detectProvider(clientKey) : envName) !== "nvidia") {
+      return fail("Timing diagnosis only applies to NVIDIA.", 400);
+    }
+    return diagnose(dKey, payload);
   }
 
   if (!payload?.imageB64 && !payload?.description) return fail("Nothing to analyze.", 400);
