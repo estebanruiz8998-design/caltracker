@@ -98,7 +98,7 @@ Three things keep it inside the window:
   `cal`) that `expandAnalysis()` maps back to the app's fields. Measured on a
   realistic five-item meal that is 31% fewer output tokens — roughly 8.2s down
   to 5.6s at 25 tok/s — and output tokens are what the time is spent on.
-- **A smaller photo.** 640px rather than 1024, which shortens the call and
+- **A smaller photo.** 512px rather than 1024, which shortens the call and
   stays clear of NVIDIA's inline-image cap.
 - **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (8.5s) so
   the failure comes back as JSON explaining itself, instead of Netlify's HTML.
