@@ -79,7 +79,7 @@ export const NVIDIA_MODEL_ID = "meta/llama-3.2-90b-vision-instruct";
    output tokens, and abort first ourselves so the failure is a readable JSON
    error instead. Raise NVIDIA_TIMEOUT_MS if your plan allows a longer one. */
 export function nvidiaBudgetMs() {
-  return Math.max(1000, Number(process.env.NVIDIA_TIMEOUT_MS) || 8500);
+  return Math.max(1000, Number(process.env.NVIDIA_TIMEOUT_MS) || 9300);
 }
 
 /* Output tokens are what the budget is spent on, and the app's field names are
@@ -95,6 +95,18 @@ Rules:
 - Every number is a plain integer, grams or kcal. No units, no ranges, no nulls, no maths.
 - cal/pr/ca/ft are the totals and must equal the sum of it[].
 - hs is 1-10, cf is "low", "medium" or "high", nt is at most 60 characters.`;
+
+/* Half the tokens again: totals plus two items. Used for the automatic retry
+   after a timeout, where finishing beats itemising. */
+export const BRIEF_RULES = `
+
+Reply with ONE compact JSON object and nothing else. No markdown, no commentary. Be fast and decisive.
+{"ok":true,"nm":"Chicken Caesar Salad","em":"🥗","it":[{"n":"Salad with chicken","q":"1 bowl","c":520,"p":38,"cb":18,"f":33}],"cal":520,"pr":38,"ca":18,"ft":33,"hs":7,"cf":"medium","nt":""}
+Rules:
+- ok is false only when there is no food or drink; then every number is 0.
+- it holds at most 2 items. Group the whole meal coarsely; do not itemise.
+- Plain integers only, grams or kcal. cal/pr/ca/ft are the totals.
+- hs is 1-10, cf is "low", "medium" or "high", nt is "".`;
 
 const NUM = (v) => { const n = typeof v === "number" ? v : parseFloat(v); return Number.isFinite(n) ? n : 0; };
 
@@ -198,9 +210,10 @@ async function callNvidia(key, payload) {
      caller sends can change it. */
   const model = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
   const started = Date.now();
-  const diag = (extra) => ({ model, ms: Date.now() - started, ...extra });
+  const diag = (extra) => ({ model, ms: Date.now() - started, brief: !!payload.brief, ...extra });
 
-  const instruction = instructionFor(payload) + COMPACT_RULES;
+  const brief = !!payload.brief;
+  const instruction = instructionFor(payload) + (brief ? BRIEF_RULES : COMPACT_RULES);
   /* Text-only requests use a plain string so models without vision still work. */
   const content = payload.imageB64
     ? [
@@ -213,8 +226,9 @@ async function callNvidia(key, payload) {
     model,
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content }],
     /* Room for four itemised foods in the compact shape, and low enough that a
-       runaway reply fails fast instead of eating the whole budget. */
-    max_tokens: 500,
+       runaway reply fails fast instead of eating the whole budget. The brief
+       retry needs far less, which is the point of it. */
+    max_tokens: brief ? 260 : 500,
     temperature: 0.2,
     top_p: 0.7,
   };
@@ -281,7 +295,7 @@ async function callNvidia(key, payload) {
     return fail("The model replied with something that isn't an analysis. Try again.", 502,
       diag({ stage: "unparsable", reply: String(text ?? "").slice(0, 300) }));
   }
-  return json({ analysis, provider: "nvidia", model, ms: Date.now() - started });
+  return json({ analysis, provider: "nvidia", model, brief, ms: Date.now() - started });
 }
 
 async function callAnthropic(key, payload) {
@@ -454,6 +468,24 @@ export default async function handler(req) {
     if (!clientKey) return fail("No key to verify.", 400);
     try { return await verifyKey(clientKey); }
     catch (e) { return fail("Could not reach the provider to check the key.", 502, String(e?.message || e).slice(0, 200)); }
+  }
+
+  if (payload?.action === "warm") {
+    const wKey = clientKey || envKey;
+    if (!wKey || (clientKey ? detectProvider(clientKey) : envName) !== "nvidia") return json({ warmed: false });
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 4000);
+    try {
+      await fetch(`${NVIDIA_BASE}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${wKey}` },
+        body: JSON.stringify({ model: (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim(),
+          messages: [{ role: "user", content: "ok" }], max_tokens: 1, temperature: 0 }),
+        signal: ac.signal,
+      });
+      return json({ warmed: true });
+    } catch { return json({ warmed: false }); }
+    finally { clearTimeout(t); }
   }
 
   if (payload?.action === "diagnose") {

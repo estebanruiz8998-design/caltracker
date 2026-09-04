@@ -496,17 +496,43 @@ function instructionFor({ imageB64, description, correction, previous }) {
    Anthropic is reserved for copies deployed without the function. */
 async function analyzeMeal(payload) {
   if (!canScan()) throw new Error(notReadyMessage());
-  if (hasProxy()) return sanitize(await analyzeViaProxy(payload));
-  return sanitize(await analyzeDirectAnthropic(payload));
+  if (!hasProxy()) return sanitize(await analyzeDirectAnthropic(payload));
+  try {
+    return sanitize(await analyzeViaProxy(payload));
+  } catch (e) {
+    /* A timeout is the model being slow, not the photo being wrong. Rather than
+       hand back an error, ask again for a coarser answer that costs about half
+       the tokens — a grouped estimate beats no estimate. */
+    if (!e || !e.timedOut) throw e;
+    if (S.scan) { S.scan.note = "Taking longer than usual — retrying with a quicker estimate…"; render(); }
+    try {
+      const out = sanitize(await analyzeViaProxy(payload, true));
+      if (S.scan) S.scan.note = "";
+      return out;
+    } catch (e2) {
+      if (S.scan) S.scan.note = "";
+      throw e2;
+    }
+  }
 }
 
-async function analyzeViaProxy({ imageB64, description, correction, previous }) {
+/* Nudge the model awake while the camera is open, so the first real scan
+   isn't the one paying for a cold start. Fire-and-forget. */
+function warmUp() {
+  if (!hasProxy() || activeProvider() !== "nvidia") return;
+  fetch(PROXY_URL, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "warm", apiKey: usingOwnKey() ? S.apiKey : undefined }),
+  }).catch(() => {});
+}
+
+async function analyzeViaProxy({ imageB64, description, correction, previous }, brief) {
   const res = await fetch(PROXY_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ imageB64, description, correction,
       previous: previous ? sanitize(previous) : undefined,
-      model: activeModel(),
+      model: activeModel(), brief: !!brief,
       /* Sent only when you've chosen your own key over the server's. */
       apiKey: usingOwnKey() ? S.apiKey : undefined }),
   });
@@ -519,7 +545,11 @@ async function analyzeViaProxy({ imageB64, description, correction, previous }) 
         ? "The scan took too long and the server cut it off. Retry — busy plates are the slowest."
         : `The server returned HTTP ${res.status}.`);
     S.lastDiag = (data && data.detail) || { status: res.status };
-    throw new Error(msg);
+    const err = new Error(msg);
+    /* Netlify's own kill (502/504 with no JSON) is a timeout too. */
+    err.timedOut = res.status === 504 || res.status === 502
+      || !!(data && data.detail && data.detail.stage === "timeout");
+    throw err;
   }
   if (!data || !data.analysis) throw new Error("No analysis returned. Please try again.");
   S.lastDiag = data.ms ? { ms: data.ms, model: data.model } : null;
@@ -585,8 +615,9 @@ async function resizeToJpeg(file, maxEdge, quality) {
 let scanGen = 0;
 function openScan() {
   S.scan = { stage: "input", thumb: null, imageB64: null, description: "", analysis: null,
-    logId: null, error: "", fixing: false, describeMode: false, showFix: false, keepFixText: "" };
+    logId: null, error: "", note: "", fixing: false, describeMode: false, showFix: false, keepFixText: "" };
   render();
+  warmUp();
 }
 function closeScan() { scanGen++; S.scan = null; render(); }
 async function onFilePicked(file) {
@@ -1344,7 +1375,7 @@ function viewScan() {
       ${sc.thumb ? `<div style="position:relative"><img src="${esc(sc.thumb)}" alt="Your meal" style="width:224px;height:224px;border-radius:24px;object-fit:cover"/><div class="shimmer" style="position:absolute;inset:0;border-radius:24px"></div></div>`
         : `<div class="shimmer" style="width:224px;height:224px;border-radius:24px"></div>`}
       <div><div style="font-weight:700;font-size:15px">Analyzing your food…</div>
-      <div class="muted" style="margin-top:4px">Estimating calories, protein, carbs and fat</div></div>
+      <div class="muted" style="margin-top:4px">${esc(sc.note || "Estimating calories, protein, carbs and fat")}</div></div>
     </div>`;
   } else if (sc.stage === "error") {
     body = `<div class="center-col" style="align-items:center;text-align:center">

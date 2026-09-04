@@ -40,7 +40,7 @@ mobile browsers.
 | `ANTHROPIC_API_KEY` | both | Anthropic key. Server-side only; never exposed to the browser. |
 | `NVIDIA_API_KEY` | standalone | NVIDIA key (`nvapi-...`). When set, the function uses NVIDIA instead of Anthropic. |
 | `NVIDIA_MODEL` | standalone | Escape hatch only. The app is built around `meta/llama-3.2-90b-vision-instruct`; change this only if your key can't reach it. |
-| `NVIDIA_TIMEOUT_MS` | standalone | How long to wait for NVIDIA before giving up (default 8500). Keep it under your Netlify function timeout. |
+| `NVIDIA_TIMEOUT_MS` | standalone | How long to wait for NVIDIA before giving up (default 9300). Keep it just under your Netlify function timeout. |
 | `NVIDIA_JSON_MODE` | standalone | `off` (default), `json_object`, or `json_schema`. Only turn on if the model supports it. |
 | `AI_PROVIDER` | standalone | Force `nvidia` or `anthropic` when both keys are present. |
 
@@ -100,8 +100,15 @@ Three things keep it inside the window:
   to 5.6s at 25 tok/s — and output tokens are what the time is spent on.
 - **A smaller photo.** 512px rather than 1024, which shortens the call and
   stays clear of NVIDIA's inline-image cap.
-- **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (8.5s) so
-  the failure comes back as JSON explaining itself, instead of Netlify's HTML.
+- **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (9.3s, just
+  inside Netlify's 10s) so the failure comes back as JSON explaining itself,
+  instead of Netlify's HTML.
+- **A quicker second attempt.** If the full analysis times out anyway, the app
+  retries once for a coarser estimate — totals plus up to two grouped items,
+  about half the tokens again. A grouped estimate beats no estimate, and the
+  user sees "retrying with a quicker estimate" rather than an error.
+- **A warm-up.** Opening the scanner fires a one-token request, so the first
+  real scan isn't the one paying for a cold model.
 
 If scans still time out, **Settings → Scanning speed → Diagnose scanning**
 answers why. It sends one request capped at a single output token, which
