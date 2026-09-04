@@ -504,7 +504,7 @@ async function analyzeMeal(payload) {
        hand back an error, ask again for a coarser answer that costs about half
        the tokens — a grouped estimate beats no estimate. */
     if (!e || !e.timedOut) throw e;
-    if (S.scan) { S.scan.note = "Taking longer than usual — retrying with a quicker estimate…"; render(); }
+    if (S.scan) { S.scan.note = "Taking longer than usual — retrying on a smaller, faster model…"; render(); }
     try {
       const out = sanitize(await analyzeViaProxy(payload, true));
       if (S.scan) S.scan.note = "";

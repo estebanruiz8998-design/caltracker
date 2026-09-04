@@ -39,7 +39,8 @@ mobile browsers.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | both | Anthropic key. Server-side only; never exposed to the browser. |
 | `NVIDIA_API_KEY` | standalone | NVIDIA key (`nvapi-...`). When set, the function uses NVIDIA instead of Anthropic. |
-| `NVIDIA_MODEL` | standalone | Escape hatch only. The app is built around `meta/llama-3.2-90b-vision-instruct`; change this only if your key can't reach it. |
+| `NVIDIA_MODEL` | standalone | Primary vision model, default `meta/llama-3.2-90b-vision-instruct`. Set it to the 11B if the 90B is being queued — see below. |
+| `NVIDIA_FALLBACK_MODEL` | standalone | Smaller model used for the retry after a timeout. Default `meta/llama-3.2-11b-vision-instruct`. |
 | `NVIDIA_TIMEOUT_MS` | standalone | How long to wait for NVIDIA before giving up (default 9300). Keep it just under your Netlify function timeout. |
 | `NVIDIA_JSON_MODE` | standalone | `off` (default), `json_object`, or `json_schema`. Only turn on if the model supports it. |
 | `AI_PROVIDER` | standalone | Force `nvidia` or `anthropic` when both keys are present. |
@@ -103,10 +104,11 @@ Three things keep it inside the window:
 - **Aborting first.** The function gives up at `NVIDIA_TIMEOUT_MS` (9.3s, just
   inside Netlify's 10s) so the failure comes back as JSON explaining itself,
   instead of Netlify's HTML.
-- **A quicker second attempt.** If the full analysis times out anyway, the app
-  retries once for a coarser estimate — totals plus up to two grouped items,
-  about half the tokens again. A grouped estimate beats no estimate, and the
-  user sees "retrying with a quicker estimate" rather than an error.
+- **A quicker second attempt, on a smaller model.** If the full analysis times
+  out, the app retries once against `NVIDIA_FALLBACK_MODEL` (the 11B) asking for
+  a coarser estimate. That changes both variables at once: an eighth the
+  parameters, on a far less contended queue, for about half the tokens. Asking a
+  queued model for less does not help; asking a different model does.
 - **A warm-up.** Opening the scanner fires a one-token request, so the first
   real scan isn't the one paying for a cold model.
 
@@ -114,11 +116,15 @@ If scans still time out, **Settings → Scanning speed → Diagnose scanning**
 answers why. It sends one request capped at a single output token, which
 isolates queueing and image prefill from the cost of writing the answer:
 
-- **Startup fast, scans slow** → the answer is the problem. Fewer foods per
-  photo helps; so does a lower item cap in `COMPACT_RULES`.
-- **Startup already eats the budget** → NVIDIA is queueing you, and no amount
-  of shortening will help. Raise `NVIDIA_TIMEOUT_MS` if your Netlify plan
-  allows a longer function, or try again when the free tier is quieter.
+It probes the 90B **and** the 11B at once, because the useful question is not
+"is it slow" but "is the smaller one faster right now":
+
+- **Both fast** → the answer is the problem. Fewer foods per photo helps.
+- **90B silent, 11B answers** → set `NVIDIA_MODEL` to the 11B. Estimates get
+  rougher; scans actually finish. The verdict names the exact value to paste.
+- **Both silent** → your whole key is being queued, or NVIDIA is down. Nothing
+  in this app can fix that: wait, or raise `NVIDIA_TIMEOUT_MS` if your Netlify
+  plan allows a longer function.
 
 Netlify's synchronous limit is 10s on the free tier and configurable up to 26s
 on paid plans. Set `NVIDIA_TIMEOUT_MS` a little under whichever applies.

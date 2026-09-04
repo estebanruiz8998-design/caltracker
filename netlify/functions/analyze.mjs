@@ -73,6 +73,14 @@ ${JSON.stringify(SCHEMA)}`;
    reliably reach. Everything below is tuned for it. */
 export const NVIDIA_MODEL_ID = "meta/llama-3.2-90b-vision-instruct";
 
+/* An eighth the size and a different, far less contended queue. Used for the
+   retry after a timeout, and worth promoting to NVIDIA_MODEL outright if the
+   90B is not being served — a rougher answer beats none. */
+export const NVIDIA_FALLBACK_MODEL_ID = "meta/llama-3.2-11b-vision-instruct";
+function fallbackModel() {
+  return (process.env.NVIDIA_FALLBACK_MODEL || NVIDIA_FALLBACK_MODEL_ID).trim();
+}
+
 /* Netlify stops a synchronous function at 10s. A 90B vision model writing the
    app's full schema often runs past that, and the kill comes back as an HTML
    error the browser can only report as "Analysis failed". So: spend fewer
@@ -208,12 +216,15 @@ export function extractJson(text) {
 async function callNvidia(key, payload) {
   /* One model, fixed. NVIDIA_MODEL stays as an escape hatch, but nothing a
      caller sends can change it. */
-  const model = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
-  const started = Date.now();
-  const diag = (extra) => ({ model, ms: Date.now() - started, brief: !!payload.brief, ...extra });
-
   const brief = !!payload.brief;
+  /* The retry changes model as well as length: if the big one is queueing,
+     asking it for less does not help, but a smaller one is a different queue. */
+  const model = brief ? fallbackModel() : (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
+  const started = Date.now();
+  const diag = (extra) => ({ model, ms: Date.now() - started, brief, ...extra });
+
   const instruction = instructionFor(payload) + (brief ? BRIEF_RULES : COMPACT_RULES);
+
   /* Text-only requests use a plain string so models without vision still work. */
   const content = payload.imageB64
     ? [
@@ -344,50 +355,56 @@ async function callAnthropic(key, payload) {
    token isolates queue + image prefill from the cost of writing the answer.
    If startup alone eats the budget, shortening the reply cannot save it. */
 async function diagnose(key, payload) {
-  const model = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
   const budgetMs = nvidiaBudgetMs();
-  const started = Date.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), budgetMs);
-  try {
-    const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: payload.imageB64
-          ? [{ type: "text", text: "Reply with one word: ok" },
-             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${payload.imageB64}` } }]
-          : "Reply with one word: ok" }],
-        max_tokens: 1, temperature: 0,
-      }),
-      signal: controller.signal,
-    });
-    const startupMs = Date.now() - started;
-    if (!res.ok) {
-      const raw = (await res.text()).slice(0, 200);
-      return json({ ok: false, model, startupMs, budgetMs, status: res.status,
-        verdict: `NVIDIA answered HTTP ${res.status} even for a one-token request. ${raw}` });
-    }
-    await res.text();
-    /* One token means essentially no decoding, so this is the floor: queueing,
-       image encoding and prefill. Everything else is written on top of it. */
-    const share = startupMs / budgetMs;
-    const verdict = share > 0.7
-      ? `The model needs ${(startupMs / 1000).toFixed(1)}s before writing a single character, which already fills the ${(budgetMs / 1000).toFixed(1)}s budget. Shortening the answer cannot fix this — the free tier is queueing your requests. Raise NVIDIA_TIMEOUT_MS if your Netlify plan allows a longer function, or try again when it is less busy.`
-      : share > 0.4
-        ? `Startup alone is ${(startupMs / 1000).toFixed(1)}s of the ${(budgetMs / 1000).toFixed(1)}s budget, leaving little room to write the answer. Photograph one dish at a time, and raise NVIDIA_TIMEOUT_MS if your plan allows.`
-        : `Startup is ${(startupMs / 1000).toFixed(1)}s, comfortably inside the ${(budgetMs / 1000).toFixed(1)}s budget. The time goes into writing the answer, so fewer foods per photo should be enough.`;
-    return json({ ok: true, model, startupMs, budgetMs, verdict });
-  } catch (e) {
-    if (e?.name === "AbortError") {
-      return json({ ok: false, model, budgetMs, timedOut: true,
-        verdict: `NVIDIA did not even acknowledge a one-token request within ${(budgetMs / 1000).toFixed(1)}s. That is queueing or an outage, not the size of the answer. Raise NVIDIA_TIMEOUT_MS if your Netlify plan allows, or try again later.` });
-    }
-    return json({ ok: false, model, budgetMs, verdict: `Could not reach NVIDIA: ${String(e?.message || e).slice(0, 150)}` });
-  } finally {
-    clearTimeout(timer);
+  const primary = (process.env.NVIDIA_MODEL || NVIDIA_MODEL_ID).trim();
+  const smaller = fallbackModel();
+
+  /* One token means essentially no decoding, so what this measures is the floor:
+     queueing, image encoding and prefill. Both models are probed at once, since
+     the useful question is not "is it slow" but "is the smaller one faster". */
+  const probe = async (model) => {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), budgetMs);
+    try {
+      const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: payload.imageB64
+            ? [{ type: "text", text: "Reply with one word: ok" },
+               { type: "image_url", image_url: { url: `data:image/jpeg;base64,${payload.imageB64}` } }]
+            : "Reply with one word: ok" }],
+          max_tokens: 1, temperature: 0,
+        }),
+        signal: controller.signal,
+      });
+      const ms = Date.now() - started;
+      if (!res.ok) return { model, ok: false, ms, status: res.status, why: `HTTP ${res.status}` };
+      await res.text();
+      return { model, ok: true, ms };
+    } catch (e) {
+      return { model, ok: false, ms: Date.now() - started,
+        why: e?.name === "AbortError" ? "no response in time" : String(e?.message || e).slice(0, 80) };
+    } finally { clearTimeout(timer); }
+  };
+
+  const [a, b] = await Promise.all([probe(primary), probe(smaller)]);
+  const secs = (r) => (r.ms / 1000).toFixed(1) + "s";
+  const budget = (budgetMs / 1000).toFixed(1) + "s";
+
+  let verdict;
+  if (!a.ok && !b.ok) {
+    verdict = `Neither model answered a one-token request within ${budget} (${primary}: ${a.why}; ${smaller}: ${b.why}). That is your whole NVIDIA key being queued or an outage, not anything about this app. Try again later, or raise NVIDIA_TIMEOUT_MS if your Netlify plan allows a longer function.`;
+  } else if (!a.ok && b.ok) {
+    verdict = `${primary} did not answer within ${budget}, but ${smaller} replied in ${secs(b)}. Set NVIDIA_MODEL to ${smaller} in Netlify — it is a smaller model on a much less contended queue. Estimates get a little rougher; scans actually finish.`;
+  } else if (a.ok && a.ms / budgetMs > 0.5) {
+    verdict = `${primary} took ${secs(a)} of the ${budget} budget before writing anything${b.ok ? `, while ${smaller} took ${secs(b)}` : ""}. That leaves very little room for the answer. ${b.ok && b.ms < a.ms ? `Switching NVIDIA_MODEL to ${smaller} would give you the headroom back.` : "Raise NVIDIA_TIMEOUT_MS if your Netlify plan allows."}`;
+  } else {
+    verdict = `${primary} started in ${secs(a)}, comfortably inside the ${budget} budget${b.ok ? ` (${smaller}: ${secs(b)})` : ""}. Startup is not the problem — the time goes into writing the answer, so fewer foods per photo should be enough.`;
   }
+  return json({ ok: a.ok || b.ok, budgetMs, primary: a, fallback: b, verdict });
 }
 
 /* Checks a key against its provider and reports the models it can reach.
