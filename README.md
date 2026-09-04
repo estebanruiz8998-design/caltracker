@@ -113,11 +113,10 @@ Three things keep it inside the window:
   real scan isn't the one paying for a cold model.
 
 If scans still time out, **Settings → Scanning speed → Diagnose scanning**
-answers why. It sends one request capped at a single output token, which
-isolates queueing and image prefill from the cost of writing the answer:
-
-It probes the 90B **and** the 11B at once, because the useful question is not
-"is it slow" but "is the smaller one faster right now":
+answers why. Each request is capped at a single output token, which isolates
+queueing and image prefill from the cost of writing the answer, and it probes
+the 90B **and** the 11B at once — because the useful question is not "is it
+slow" but "is the smaller one being served right now":
 
 - **Both fast** → the answer is the problem. Fewer foods per photo helps.
 - **90B silent, 11B answers** → set `NVIDIA_MODEL` to the 11B. Estimates get
